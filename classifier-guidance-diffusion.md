@@ -213,7 +213,7 @@ So to answer the natural question "do gradients go back through the diffusion pr
 - **Guidance stacks on top of conditioning.** Even for a *class-conditional* diffusion model (which already takes $y$ as input), adding classifier guidance on top further improves sample quality. Guidance and conditioning are complementary.
 - **Architecture note (context only).** The other half of the paper is the improved "ADM" U-Net: adaptive group norm (**AdaGN**) that injects the timestep and class embeddings into each residual block, **attention at multiple resolutions** (32×32, 16×16, 8×8) rather than one, **BigGAN-style residual blocks** for up/downsampling, and more width/depth. These gains are architectural and largely orthogonal to the guidance idea, so we don't dwell on them here.
 
-The lasting conceptual gift of this paper is the **score decomposition** — "conditional score = unconditional score + classifier gradient." That single equation is the seed from which Classifier-Free Guidance grows by replacing the explicit classifier with an implicit one.
+The lasting conceptual gift of this paper is the **score decomposition** — "conditional score = unconditional score + classifier gradient." That single equation is the seed from which Classifier-Free Guidance grows by replacing the explicit classifier with an implicit one — see the companion note `classifier-free-guidance.md`.
 
 ---
 
@@ -265,13 +265,13 @@ $$
 \hat{x}_0 = \frac{x_t - \sqrt{1 - \bar\alpha_t}\;\epsilon_\theta(x_t, t)}{\sqrt{\bar\alpha_t}}
 $$
 
-(This is just the [forward relation](#setup-and-notation) solved for $x_0$.) That "evaluate the guide on $\hat{x}_0$ instead of $x_t$" idea is exactly what the next paper turns into a general principle.
+(This is just the [forward relation](#setup-and-notation) solved for $x_0$.) That "evaluate the guide on $\hat{x}_0$ instead of $x_t$" idea is exactly what the next paper turns into a general principle. *(For the mechanics of the CLIP guidance and the seamless local editing, see the [deep dive](#deep-dive-guiding-with-off-the-shelf-clean-image-models-blended-diffusion--universal-guidance) below.)*
 
 ### Universal Guidance (CVPR 2023) — reuse *any* off-the-shelf model, no noisy retraining
 
 The most different of the five, because it removes the biggest practical pain point of the original recipe: needing a special **noise-aware** classifier. Their key move generalizes the Blended trick — at each step, form the predicted clean image $\hat{x}_0$ from the current $x_t$, then evaluate a **standard, off-the-shelf** model on $\hat{x}_0$: an ordinary ImageNet classifier, an object detector, a segmentation network, a face-recognition model — all trained only on clean images — and backpropagate that guidance gradient through to $x_t$. Because the guide only ever sees a clean-*looking* image, any pretrained model works unchanged, with no retraining on noisy data.
 
-On top of this "forward guidance," they add two refinements: a **backward guidance** step (a small optimization that more directly enforces the constraint the guide encodes) and a **self-recurrence** loop (re-noise and re-denoise a step a few times) to keep image quality high under strong guidance. The net effect is to turn classifier guidance from *"train a bespoke noisy classifier per task"* into *"plug in whatever pretrained model you already have."*
+On top of this "forward guidance," they add two refinements: a **backward guidance** step (a small optimization that more directly enforces the constraint the guide encodes) and a **self-recurrence** loop (re-noise and re-denoise a step a few times) to keep image quality high under strong guidance. The net effect is to turn classifier guidance from *"train a bespoke noisy classifier per task"* into *"plug in whatever pretrained model you already have."* *(Expanded in the [deep dive](#deep-dive-guiding-with-off-the-shelf-clean-image-models-blended-diffusion--universal-guidance) below.)*
 
 ### Comparison at a Glance
 
@@ -282,6 +282,114 @@ On top of this "forward guidance," they add two refinements: a **backward guidan
 | Diffusion-LM (NeurIPS'22) | Attribute classifier | Text (embeddings) | Classifier trained on noisy latents |
 | Blended Diffusion (CVPR'22) | Pre-trained CLIP (text prompt) | Images (masked edit) | Evaluate guide on predicted clean $\hat{x}_0$ |
 | Universal Guidance (CVPR'23) | Any off-the-shelf model | Images | Evaluate guide on $\hat{x}_0$ (+ backward guidance, self-recurrence) |
+
+---
+
+## Deep Dive: Guiding with Off-the-Shelf, Clean-Image Models (Blended Diffusion & Universal Guidance)
+
+Two of the survey papers deserve a closer look, because they share one elegant idea that dissolves the single biggest annoyance of the original recipe.
+
+Recall the pain point from the [main paper](#how-the-classifier-was-trained): the classifier had to be **retrained on noisy images**, because during sampling it only ever sees a noisy $x_t$, and a normal clean-image classifier is useless on noise. That is a real tax — every new guidance signal means training a new noise-aware model.
+
+**The shared insight:** at any step you can ask the frozen diffusion model for its **predicted clean image** $\hat{x}_0$ — its best current guess of the final, denoised result — computed from $x_t$ and the predicted noise (from the [notation](#setup-and-notation), the forward relation solved for $x_0$):
+
+$$
+\hat{x}_0 = \frac{x_t - \sqrt{1 - \bar\alpha_t}\;\epsilon_\theta(x_t, t)}{\sqrt{\bar\alpha_t}}
+$$
+
+$\hat{x}_0$ *looks like a clean image* (blurry early on, sharp later), so you can hand it to any **off-the-shelf model trained on clean data** and get a sensible answer. Guide on $\hat{x}_0$ instead of $x_t$ and the noisy-retraining problem simply disappears. **Blended Diffusion** is the specific, beautiful case of this idea (CLIP + local editing); **Universal Guidance** is its full generalization (any model, plus two refinements).
+
+### Blended Diffusion (CVPR 2022)
+
+**Task.** You give three things: an image, a binary **mask** $m$ marking a region of interest (ROI), and a **text prompt** $d$. The goal is to edit *only* inside the mask so the region matches the text — "put a party hat here" — while leaving the rest of the image untouched and making the result look seamless, not pasted. Both networks are **frozen**: a pretrained unconditional diffusion model and pretrained **CLIP**. Nothing is trained; the whole method is zero-shot.
+
+**CLIP as the guide (a judge, not a fixed label).** In the [core recipe](#the-core-derivation) the guide was a classifier for a fixed class $y$. Here the guide is **CLIP**, which embeds an image and a text into a shared space and scores their similarity. The guidance signal is the gradient of a CLIP loss
+
+$$
+\mathcal{L}_{\text{CLIP}} = -\,\mathrm{sim}\big(\text{CLIP}_{\text{img}}(\cdot),\; \text{CLIP}_{\text{txt}}(d)\big)
+$$
+
+that pushes the image to be *more similar to the prompt $d$*. Because $d$ is free-form text, you are no longer limited to a fixed label set — any description works. This is what "CLIP as an off-the-shelf judge" means.
+
+**Mechanism 1 — how CLIP (a clean-image model) works inside a noisy loop.** Two pieces:
+
+1. **Evaluate CLIP on $\hat{x}_0$, not $x_t$.** CLIP was trained on clean natural images; feeding it a noisy $x_t$ gives unreliable, off-distribution scores. So at each step they run CLIP on the predicted clean image $\hat{x}_0$ instead. Now CLIP always sees something clean-looking, exactly the distribution it understands.
+2. **Extending augmentations (to avoid adversarial gradients).** A subtle trap: if you differentiate CLIP through a *single* view of $\hat{x}_0$, the gradient tends to produce an **adversarial** result — imperceptible high-frequency pixel noise that spikes the CLIP score without actually looking like the prompt. Their fix is to apply a set of **random augmentations** (crops, projective transforms) to $\hat{x}_0$, score CLIP on each, and **average the loss over them**. An adversarial perturbation tuned for one view falls apart under a different crop, so only a *genuinely semantic* change survives all views. Averaging over augmentations is what turns the CLIP gradient from "adversarial noise" into "make this region actually look like the text."
+
+**Mechanism 2 — how local editing stays seamless (blending).** The naive approach — generate a new region and paste it into the mask at the end — leaves visible seams and ignores context. Blended Diffusion instead **blends at every denoising step, in the noisy latent space.** At step $t$ it maintains two versions of the latent:
+
+- $x_t^{\text{fg}}$ — the **foreground**: the CLIP-guided denoising result (the edit in progress).
+- $x_t^{\text{bg}}$ — the **background**: the *original input image* pushed forward through the diffusion noising process to the *same* noise level $t$.
+
+It then combines them with the mask:
+
+$$
+x_t \;\leftarrow\; m \odot x_t^{\text{fg}} \;+\; (1 - m)\odot x_t^{\text{bg}}
+$$
+
+($\odot$ is elementwise multiply.) So inside the mask you keep the guided edit; outside the mask you keep a correctly-noised copy of the original. The key is that this happens **at every step, on noisy latents** — not as a final paste. Because the blended latent is fed back through the next denoising step, the network **re-harmonizes the boundary**: it denoises the edited region and the original background *together*, so lighting, texture, and edges match across the mask edge. The result is a coherent local edit with no seam, and — since sampling is stochastic — you can draw several different plausible edits for the same prompt.
+
+**Why it mattered.** It was the first method to do **text-driven, region-based editing of arbitrary natural images**, entirely zero-shot from two frozen pretrained models.
+
+### Universal Guidance (CVPR 2023)
+
+Universal Guidance takes Blended's "evaluate the guide on $\hat{x}_0$" trick and turns it into a **general framework**: control *any* frozen pretrained diffusion model (they use **Stable Diffusion**) with *any* off-the-shelf guidance model, with no retraining of either.
+
+**Forward guidance (the generalized Blended trick).** Exactly the shared insight above, but the guide can be *anything* that reads a clean image: an ordinary ImageNet **classifier**, an **object detector**, a **segmentation** network, a **face-recognition** model, or CLIP. Form $\hat{x}_0$, evaluate the chosen model on it, backprop that loss to $x_t$, and steer. One recipe, a whole zoo of controls — because every one of those models was trained on clean images and $\hat{x}_0$ is clean-looking.
+
+**Backward guidance (for precise, pixel-aligned constraints).** A single forward gradient is a weak nudge — fine for "make it more cat-like," but too soft for a hard spatial constraint like "match *this* segmentation map" or "put the box *here*." So they add a **backward** step: solve a small **optimization** to find a correction $\Delta$ such that the predicted clean image $\hat{x}_0 + \Delta$ actually (nearly) satisfies the guidance constraint, then steer the sample using that $\Delta$. This enforces the constraint far more directly than one gradient step, and the paper shows the hybrid **forward + backward** scheme clearly beats forward-only on fine, pixel-aligned tasks (segmentation, box placement, complex inpainting).
+
+**Self-recurrence (to protect image quality).** Strong guidance can drag the sample off the diffusion model's natural manifold, hurting realism. Their fix is a **self-recurrence** ("time-travel") loop: at a given step, **re-noise** the partially denoised sample back up a level and **denoise it again**, repeating a few times. This lets the guided content and the model's own image statistics settle into agreement, keeping quality high under aggressive guidance.
+
+**Why it mattered.** It reframed classifier guidance from *"train a bespoke noise-aware classifier per task"* into *"plug in whatever pretrained model you already have"* — segmentation, detection, face ID, CLIP — on top of an off-the-shelf diffusion model.
+
+### Why This Family Matters
+
+Both papers attack the same structural weakness of the original recipe — the need for a **noise-aware** guide — and solve it the same way: **guide on the predicted clean image $\hat{x}_0$**, so any clean-trained model qualifies. Blended adds the two ideas that make it actually work in practice (augmentations to kill adversarial gradients; per-step blending for seamless locality), and Universal Guidance generalizes the guide to anything and adds backward guidance + self-recurrence for precision and quality. Together they mark the shift from *train-a-classifier-on-noise* to *reuse-any-pretrained-model-off-the-shelf* — the practical form of guidance most systems use today.
+
+### Sources
+
+- Blended Diffusion: [Avrahami, Lischinski, Fried — *Blended Diffusion for Text-Driven Editing of Natural Images* (CVPR 2022)](https://openaccess.thecvf.com/content/CVPR2022/html/Avrahami_Blended_Diffusion_for_Text-Driven_Editing_of_Natural_Images_CVPR_2022_paper.html); code: [`omriav/blended-diffusion`](https://github.com/omriav/blended-diffusion).
+- Universal Guidance: [Bansal et al. — *Universal Guidance for Diffusion Models* (CVPR 2023 Workshops), arXiv:2302.07121](https://arxiv.org/abs/2302.07121).
+
+---
+
+## Guidance for Flow-Based Models
+
+This note's title says "Diffusion/**Flow** based methods" for a reason: the whole guidance story carries over to flow-based generative models essentially unchanged. In fact flow-matching models are now the *more common* backbone for large text-to-image and video systems, so this is where guidance mostly lives today.
+
+**First, which "flow" we mean.** *Classic normalizing flows* (RealNVP, Glow — invertible nets with exact likelihood) are a separate world where guidance is rare. The relevant models here are **flow matching / rectified flow** (Lipman et al. 2023; Liu et al.) — the modern ODE-based generators that are close cousins of diffusion.
+
+**Why guidance transfers for free.** Diffusion and flow matching are two views of the same transport from noise to data. A diffusion model learns the [score](#background-you-need-the-score-view-of-diffusion) $\nabla_{x_t}\log p(x_t)$; a flow-matching model learns a **velocity field** $v_\theta(x_t, t)$ — the arrow that the probability-flow ODE follows at each point and time. For the usual Gaussian noising paths, the two are **linearly related**:
+
+$$
+v_\theta(x_t, t) = a_t\, x_t + b_t \, \nabla_{x_t}\log p(x_t)
+$$
+
+where $a_t, b_t$ are known scalar functions of the noise schedule (not learned). Because velocity is just a linear function of the score, the [score decomposition](#the-core-derivation) at the heart of this note — *conditional score = unconditional score + guide gradient* — drops straight into a **velocity correction**:
+
+$$
+\underbrace{v_\theta(x_t, t \mid y)}_{\text{guided velocity}}
+= \underbrace{v_\theta(x_t, t)}_{\text{unconditional velocity}}
++ \; b_t \, \nabla_{x_t}\log p_\phi(y \mid x_t)
+$$
+
+Same idea, same classifier gradient — you just add $b_t$ times it to the velocity field instead of shifting a Gaussian mean. Guidance is really a property of the underlying probability path, not of diffusion specifically.
+
+**What has actually been done.**
+
+- **Classifier-free guidance on flows** is now standard and at production scale: **Stable Diffusion 3** and **Flux** are rectified-flow models that use CFG. *Guided Flows* (Zheng et al., 2023) was an early paper explicitly porting CFG to flow matching.
+- **Classifier / training-free guidance on flows**: **TFG-Flow** brings training-free guidance to generative flows, and the off-the-shelf-model recipe from the [deep dive](#deep-dive-guiding-with-off-the-shelf-clean-image-models-blended-diffusion--universal-guidance) applies directly — the predicted clean image $\hat{x}_0$ is just as recoverable from the flow ODE, so any clean-trained guide works the same way.
+- **Flow-specific refinements**: guidance can push rectified-flow samples off-manifold (over-saturation, structural distortion), so methods like **CFG-Zero\*** and **Rectified-CFG++** adjust the guidance schedule to keep samples faithful.
+
+**Takeaway.** Classifier guidance was born in diffusion, but it moved with the field to flow matching, where the same score-space nudge becomes a velocity-field nudge. Nothing conceptual changes.
+
+### Sources
+
+- [Lipman et al. — *Flow Matching for Generative Modeling* (ICLR 2023), arXiv:2210.02747](https://arxiv.org/abs/2210.02747)
+- [Zheng et al. — *Guided Flows for Generative Modeling and Decision Making*, arXiv:2311.13443](https://arxiv.org/abs/2311.13443)
+- [TFG-Flow — *Training-free Guidance in Multimodal Generative Flow*, arXiv:2501.14216](https://arxiv.org/abs/2501.14216)
+- [CFG-Zero\* — *Improved Classifier-Free Guidance for Flow Matching Models*, arXiv:2503.18886](https://arxiv.org/abs/2503.18886)
 
 ---
 
