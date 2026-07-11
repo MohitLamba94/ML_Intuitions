@@ -95,7 +95,7 @@ The gradient that tries to raise the correct class output $o_{\text{cat}}$ towar
 $$
 \frac{\partial L}{\partial z_{\text{cat}}}
 = 2\,(o_{\text{cat}} - 1) \cdot \frac{\partial o_{\text{cat}}}{\partial z_{\text{cat}}}
-= 2\,(o_{\text{cat}} - 1) \cdot \frac{\operatorname{sign}(z_{\text{cat}})}{|z_{\text{dog}}|}
+= 2\,(o_{\text{cat}} - 1) \cdot \frac{\mathrm{sign}(z_{\text{cat}})}{|z_{\text{dog}}|}
 $$
 
 Look at that last factor: $1 / |z_{\text{dog}}|$. **The denominator is the size of the wrong class's logit.** This is the crux.
@@ -237,7 +237,7 @@ Throughout, the logits are $z = (z_1, \dots, z_K)$, the softmax is $p_i = e^{z_i
 | Product / reciprocal | $\dfrac{d}{dx}\,(u v) = u'v + uv'$, and $\dfrac{d}{dx}\,v^{-1} = -v^{-2}v'$ |
 | Exponential | $\dfrac{d}{dz} e^{z} = e^{z}$ |
 | Logarithm | $\dfrac{d}{dp} \ln p = \dfrac{1}{p}$ |
-| Absolute value | $\dfrac{d}{dz} |z| = \operatorname{sign}(z)$ for $z \neq 0$; a subgradient (any value in $[-1,1]$, PyTorch returns $0$) at $z = 0$ |
+| Absolute value | $\dfrac{d}{dz} |z| = \mathrm{sign}(z)$ for $z \neq 0$; a subgradient (any value in $[-1,1]$, PyTorch returns $0$) at $z = 0$ |
 | Linearity | $\dfrac{d}{dx}\sum_i f_i = \sum_i \dfrac{d f_i}{dx}$ |
 | Kronecker delta | bookkeeping device: $\delta_{ij} = 1$ if $i = j$, else $0$; note $\dfrac{\partial z_i}{\partial z_j} = \delta_{ij}$ |
 
@@ -341,25 +341,25 @@ Let $M = \max_k |z_k| = |z_m|$, where $m$ is the (assumed unique) argmax index, 
 For a **non-max** index $i \neq m$, the denominator $M$ does not depend on $z_i$, so it is a constant for this partial derivative. Using the **absolute-value rule** on the numerator:
 
 $$
-\frac{\partial o_i}{\partial z_i} = \frac{1}{M}\frac{\partial |z_i|}{\partial z_i} = \frac{\operatorname{sign}(z_i)}{M}
+\frac{\partial o_i}{\partial z_i} = \frac{1}{M}\frac{\partial |z_i|}{\partial z_i} = \frac{\mathrm{sign}(z_i)}{M}
 $$
 
 Then the **chain rule** through the MSE gives the correct-class gradient quoted in [Problem 1](#problem-1-it-reintroduces-vanishing-gradients) (take $i = \text{cat}$, $M = |z_{\text{dog}}|$):
 
 $$
 \frac{\partial L}{\partial z_{\text{cat}}}
-= 2(o_{\text{cat}} - y_{\text{cat}})\,\frac{\operatorname{sign}(z_{\text{cat}})}{M}
-= 2(o_{\text{cat}} - 1)\,\frac{\operatorname{sign}(z_{\text{cat}})}{|z_{\text{dog}}|}
+= 2(o_{\text{cat}} - y_{\text{cat}})\,\frac{\mathrm{sign}(z_{\text{cat}})}{M}
+= 2(o_{\text{cat}} - 1)\,\frac{\mathrm{sign}(z_{\text{cat}})}{|z_{\text{dog}}|}
 $$
 
 The offending $1/M$ is just the constant denominator passing through the derivative — and it shrinks the gradient whenever the winning (here wrong) logit is large.
 
-For completeness, the dependence on the **max** logit $z_m$ itself, via the **reciprocal rule** $\partial M^{-1}/\partial z_m = -M^{-2}\operatorname{sign}(z_m)$:
+For completeness, the dependence on the **max** logit $z_m$ itself, via the **reciprocal rule** $\partial M^{-1}/\partial z_m = -M^{-2}\mathrm{sign}(z_m)$:
 
 $$
-\frac{\partial o_i}{\partial z_m} = |z_i|\cdot\left(-\frac{\operatorname{sign}(z_m)}{M^2}\right) = -\frac{|z_i|\,\operatorname{sign}(z_m)}{M^2} \quad (i \neq m),
+\frac{\partial o_i}{\partial z_m} = |z_i|\cdot\left(-\frac{\mathrm{sign}(z_m)}{M^2}\right) = -\frac{|z_i|\,\mathrm{sign}(z_m)}{M^2} \quad (i \neq m),
 \qquad
 \frac{\partial o_m}{\partial z_m} = \frac{\partial (1)}{\partial z_m} = 0
 $$
 
-The last equation restates a structural fact: since $o_m \equiv 1$ identically, the max element contributes **zero** gradient — the no-margin-pressure problem, now visible in one line. Note also that $\operatorname{sign}(\cdot)$ is only valid away from $z = 0$, and that $M = \max(\cdot)$ is non-differentiable at ties (where the argmax switches) — the kinks flagged in [Problem 2](#problem-2-the-absolute-value-folds-the-space) and [Problem 3](#problem-3-scale-invariance-leaves-a-flat-direction).
+The last equation restates a structural fact: since $o_m \equiv 1$ identically, the max element contributes **zero** gradient — the no-margin-pressure problem, now visible in one line. Note also that $\mathrm{sign}(\cdot)$ is only valid away from $z = 0$, and that $M = \max(\cdot)$ is non-differentiable at ties (where the argmax switches) — the kinks flagged in [Problem 2](#problem-2-the-absolute-value-folds-the-space) and [Problem 3](#problem-3-scale-invariance-leaves-a-flat-direction).
