@@ -114,7 +114,7 @@ This closed form is also exactly what makes training cheap: to get a training ex
 
 ### 1.3 The reverse process: why it's hard, and why a Gaussian
 
-To generate, we must go the other way: given $x_t$, produce a slightly cleaner $x_{t-1}$. The honest object we'd want is the reverse conditional $q(x_{t-1} \mid x_t)$.
+To generate, we must go the other way: given $x_t$, produce a slightly cleaner $x_{t-1}$. The honest object we'd want is the reverse conditional $q(x_{t-1} \mid x_t)$. *(New to terms like "conditional," "posterior," or "marginal"? See [Extra 1 — A Probability Primer](#extra-1--a-probability-primer).)*
 
 **Why it's intractable.** By Bayes' rule, $q(x_{t-1}\mid x_t) \propto q(x_t \mid x_{t-1})\, q(x_{t-1})$. The first factor is easy (it's our forward step), but $q(x_{t-1})$ is the distribution of *all possible slightly-noised images at level $t-1$* — which depends on the entire data distribution (you'd have to average over every image that could have produced this $x_t$). We don't have that distribution in closed form; it's the very thing generative modeling is trying to capture. So the exact reverse step can't be written down.
 
@@ -144,7 +144,7 @@ So the entire learning problem reduces to: **model the mean of each small revers
 
 ### 1.5 Training: from likelihood, to ELBO, to "predict the noise"
 
-We'd like to train by **maximum likelihood** — make the model assign high probability $p_\theta(x_0)$ to real images. But $p_\theta(x_0) = \int p_\theta(x_0, x_1, \dots, x_T)\, dx_{1:T}$ requires integrating over *all* the intermediate noisy versions $x_1,\dots,x_T$ (the latent variables), which is intractable. We can't compute the likelihood directly, so we can't maximize it directly.
+We'd like to train by **maximum likelihood** — make the model assign high probability $p_\theta(x_0)$ to real images. But $p_\theta(x_0) = \int p_\theta(x_0, x_1, \dots, x_T)\, dx_{1:T}$ requires integrating over *all* the intermediate noisy versions $x_1,\dots,x_T$ (the latent variables), which is intractable. We can't compute the likelihood directly, so we can't maximize it directly. *(Unsure what "likelihood," "marginal," "ELBO," or "Jensen's inequality" mean? See [Extra 1 — A Probability Primer](#extra-1--a-probability-primer).)*
 
 **What ELBO is.** The **Evidence Lower BOund** is a quantity we *can* compute that is guaranteed to sit **below** the true log-likelihood: $\text{ELBO} \le \log p_\theta(x_0)$. Because it's a lower bound, pushing the ELBO *up* pushes the (uncomputable) log-likelihood up with it — so we maximize the ELBO as a tractable stand-in for maximizing likelihood. (It becomes computable precisely because it's written using the *known* forward process and the *tractable* posterior $q(x_{t-1}\mid x_t,x_0)$ from §1.3, instead of the intractable marginal.)
 
@@ -687,13 +687,77 @@ The unifying statements:
 
 ---
 
-## Extras — The Other Root: Score Matching Across Noise Scales (NCSN)
+## Extras — Optional Deep-Dives
 
-> *Optional and self-contained. Nothing earlier depends on it, so you can skip it — but it fills in the prequel to [Part 4](#part-4--the-universal-view-the-score-function-ties-it-all-together): the second historical root of diffusion models, from which the "many noise levels" idea and annealed Langevin sampling come.*
+> *Two self-contained extras; nothing in Parts 1–4 depends on either, so skip freely. **Extra 1** is a short probability primer (marginal, posterior, Bayes, likelihood, Jensen) — the background the main text quietly leans on. **Extra 2** fills in the prequel to [Part 4](#part-4--the-universal-view-the-score-function-ties-it-all-together): the score-matching root of diffusion.*
+
+### Extra 1 — A Probability Primer
+
+This gathers the handful of probability ideas the note leans on — especially in [§1.3](#13-the-reverse-process-why-its-hard-and-why-a-gaussian) (marginal, posterior) and [§1.5](#15-training-from-likelihood-to-elbo-to-predict-the-noise) (likelihood, ELBO, Jensen). Each idea is built from the one before it.
+
+**A density $p(x)$.** A probability density says how likely each value $x$ is; for continuous $x$ it integrates to one, $\int p(x)\,dx = 1$, and a larger $p(x)$ means $x$ is more typical. Everything below is bookkeeping about how the densities of several variables relate.
+
+**Joint and conditional.** With two variables $x$ and $z$, the **joint** $p(x,z)$ is how likely the pair is *together*; the **conditional** $p(x\mid z)$ is how likely $x$ is *once $z$ is known*. They are tied by the **product rule**:
+
+$$
+p(x,z) = p(x\mid z)\,p(z)
+$$
+
+read as "probability of both = probability of $z$, times probability of $x$ given $z$."
+
+**Marginal — "integrate out the rest."** If you hold the joint but care only about $x$, you **marginalize**: integrate the other variable away.
+
+$$
+p(x) = \int p(x,z)\,dz
+$$
+
+You are adding up the probability of $x$ over *every* way $z$ could have turned out. (The name is literal: picture the joint as a table and write each row's total in the margin.) This is not a footnote for us — a generative model defines a joint over the data $x_0$ and all its latents (the noisy versions $x_1,\dots,x_T$), and the number we ultimately want, the probability the model assigns to a real image, is the **marginal** $p_\theta(x_0)=\int p_\theta(x_0,x_1,\dots,x_T)\,dx_{1:T}$. That integral over all latent trajectories is exactly the intractable object [§1.5](#15-training-from-likelihood-to-elbo-to-predict-the-noise) had to sidestep.
+
+**Bayes' rule, and its four names.** Writing the product rule the two possible ways, $p(x,z)=p(x\mid z)\,p(z)=p(z\mid x)\,p(x)$, and solving for one conditional gives **Bayes' rule**:
+
+$$
+p(z\mid x) = \frac{p(x\mid z)\,p(z)}{p(x)}
+$$
+
+Its four pieces are worth memorizing: the **prior** $p(z)$ (belief about the hidden $z$ before seeing data), the **likelihood** $p(x\mid z)$ (how well a given $z$ explains the observed $x$), the **posterior** $p(z\mid x)$ (updated belief about $z$ after seeing $x$), and the **evidence** $p(x)$ (a marginal, $\int p(x\mid z)\,p(z)\,dz$, that just normalizes). This exact rearrangement drives the reverse posterior in [§1.3](#13-the-reverse-process-why-its-hard-and-why-a-gaussian) and the whole classifier-guidance idea in the companion note.
+
+**Posterior — belief after seeing data.** The posterior $p(z\mid x)$ is the payoff of Bayesian reasoning: *given what I observed ($x$), what should I now believe about the hidden $z$?* It is usually hard to compute because its denominator $p(x)$ is a marginal — that integral again. This is precisely why [§1.3](#13-the-reverse-process-why-its-hard-and-why-a-gaussian) said the reverse conditional is intractable in general, yet becomes a clean Gaussian once you *also* condition on $x_0$ (which removes the need to integrate over all data).
+
+**Likelihood — a density read as a function of the parameters.** The likelihood is the *same* density $p_\theta(x)$, but read as a function of the model parameters $\theta$ with the data held fixed. Probability asks "given this model, how likely is this data?"; likelihood flips the viewpoint — "given this data, how good is this $\theta$?" Same formula, different variable in the driver's seat. We write $L(\theta)=p_\theta(\text{data})$.
+
+**Why we maximize likelihood.** To fit a generative model we pick the $\theta$ that maximizes the likelihood of the *real* data — the parameters under which the data we actually observed is most probable (**maximum likelihood estimation**). Intuitively: make the model place as much probability mass as possible on real images, and by conservation of mass, less on everything else. This is not arbitrary — maximizing likelihood is equivalent to **minimizing the KL divergence** (hence the cross-entropy; see `cross_entropy_loss.md`) between the true data distribution and the model, i.e. making the model's distribution match the data's as closely as possible.
+
+**Why the *log*-likelihood.** In practice we maximize $\log p_\theta(\text{data})$, for four reasons: (i) data points are treated as independent, so the likelihood is a giant *product* $\prod_i p_\theta(x_i)$, and $\log$ turns it into a *sum* $\sum_i \log p_\theta(x_i)$ — easier to differentiate and numerically stable (a product of many small numbers underflows to zero); (ii) $\log$ is monotonically increasing, so the $\theta$ that maximizes the log also maximizes the likelihood — nothing is lost; (iii) the densities we use (Gaussians, exponential-family) carry an $\exp$ that $\log$ cancels into something simple; (iv) the average negative log-likelihood *is* the cross-entropy between data and model, tying MLE to information theory.
+
+**Jensen's inequality — the bridge to the ELBO.** Finally, the tool that makes the ELBO possible. For a **concave** function ($\log$ is concave), the function of an average is at least the average of the function:
+
+$$
+\log \mathbb{E}[Y] \;\ge\; \mathbb{E}[\log Y]
+$$
+
+The picture: for a concave curve the straight chord joining two points lies *below* the curve, so averaging *inside* the $\log$ (staying on the curve) beats averaging *after* the $\log$ (sliding down to the chord).
+
+![The concave curve y = log x in blue with a chord between two points drawn in green below it; at the average input, the point on the curve (log of the mean) sits above the point on the chord (mean of the logs), with a dotted segment showing the gap.](./assets/jensen_inequality.jpg){ width=60% }
+
+*Jensen's inequality for $\log$: at the same input $\mathbb E[Y]$, the curve value $\log\mathbb E[Y]$ (blue dot) sits above the chord value $\mathbb E[\log Y]$ (green dot). The gap is what a lower bound gives up.*
+
+Why we care: the log-likelihood we want is the log of a marginal, $\log p_\theta(x_0)=\log\int p_\theta(x_0,z)\,dz$ — a **log of an integral (an average)**, which is intractable. Introduce *any* distribution $q(z)$, rewrite the integral as an expectation, and apply Jensen:
+
+$$
+\log p_\theta(x_0) = \log \int q(z)\,\frac{p_\theta(x_0,z)}{q(z)}\,dz
+= \log \mathbb{E}_q\!\left[\frac{p_\theta(x_0,z)}{q(z)}\right]
+\;\ge\; \mathbb{E}_q\!\left[\log \frac{p_\theta(x_0,z)}{q(z)}\right]
+$$
+
+The right-hand side is a *tractable* lower bound — the **ELBO** (Evidence Lower BOund) — and pushing it up pushes up the true log-likelihood. That single inequality is the move [§1.5](#15-training-from-likelihood-to-elbo-to-predict-the-noise) leaned on to turn the intractable likelihood into DDPM's trainable objective.
+
+### Extra 2 — The Other Root: Score Matching Across Noise Scales (NCSN)
+
+> *Fills in the prequel to [Part 4](#part-4--the-universal-view-the-score-function-ties-it-all-together): the second historical root of diffusion models, from which the "many noise levels" idea and annealed Langevin sampling come.*
 
 Part 4 said DDPM is secretly a score model, and that generation is "follow the score." A natural question: why not just train **one** score network $s_\theta(x)\approx\nabla_x\log p_{\text{data}}(x)$ on clean data and run Langevin (§4.3) to sample? That is precisely what Song & Ermon (2019) tried first — and it fails for two linked reasons. Fixing them produces **NCSN** (Noise-Conditional Score Networks), the sibling of DDPM that Song et al. (2021) later fused with it into the score-SDE framework Part 4 rests on.
 
-### The pitfall: one score model is not enough
+#### The pitfall: one score model is not enough
 
 The score $\nabla_x\log p_{\text{data}}(x)$ can only be learned *where there is data*. In the vast **low-density regions** between the modes of real data, there are almost no training samples, so the estimated score there is unreliable — it is fit to noise. But those empty regions are exactly the terrain a sampler must cross to travel from a random start to a mode. Worse, plain Langevin dynamics mixes very slowly across a low-density gap: once inside one mode it rarely musters the pushes needed to cross the desert to another. So a single-scale score model gives you good arrows near the data and useless arrows in between — and gets stuck.
 
@@ -701,11 +765,11 @@ The score $\nabla_x\log p_{\text{data}}(x)$ can only be learned *where there is 
 
 *Near each mode the score is trustworthy (dark arrows); in the low-density gap between modes (shaded band) there is little data, so the learned score is unreliable (faded arrows) — and Langevin started out here has nothing dependable to follow.*
 
-### The fix: perturb the data at many noise scales
+#### The fix: perturb the data at many noise scales
 
 The cure is to **blur the data with a ladder of Gaussian noise levels** $\sigma_1 > \sigma_2 > \cdots > \sigma_L$. At a *large* $\sigma$, the noisy distribution is smeared out so much that its mass spreads across the whole space — the empty gap is filled in, and the score becomes well-defined *everywhere*. At a *small* $\sigma$, the distribution is almost the clean data, preserving fine detail. Train **one noise-conditional network** $s_\theta(x, \sigma)$ to predict the score at every level (this is denoising score matching — the same "predict the noise" regression as DDPM, now indexed by $\sigma$). Note this is exactly the [unified schedule](#47-two-sides-of-the-same-coin) view again: a family of noised distributions indexed by a noise level.
 
-### Annealed Langevin dynamics: sample coarse-to-fine
+#### Annealed Langevin dynamics: sample coarse-to-fine
 
 With a score for every scale, you generate by **annealed Langevin dynamics**: start at the *largest* noise scale (where the score is reliable everywhere) and run a few Langevin steps; then lower $\sigma$ one rung and continue; repeat down to the smallest. Early on, the big-noise score reliably pulls samples out of the empty regions and toward the right coarse structure; later rungs sharpen them onto the true data modes. Coarse layout first, detail last.
 
@@ -713,7 +777,7 @@ With a score for every scale, you generate by **annealed Langevin dynamics**: st
 
 *Top: perturbing the data at shrinking noise scales — large $\sigma$ fills the gap (score learnable everywhere), small $\sigma$ keeps detail. Bottom: annealed Langevin — samples begin scattered everywhere and, as we step down the ladder, collapse onto the two data modes. Coarse-to-fine.*
 
-### How this ties back
+#### How this ties back
 
 This "ladder of noise scales + learn the score at each + anneal from high to low noise" is **NCSN**. Squint and it is DDPM wearing different clothes: DDPM's $\bar\alpha_t$ schedule *is* a ladder of noise scales, its $\epsilon_\theta$ *is* a noise-conditional score model (§4.4), and its reverse sampler *is* a coarse-to-fine walk down that ladder. Song et al. (2021) made this precise — both are discretizations of the same **score-SDE**, with NCSN the "variance-exploding" and DDPM the "variance-preserving" choice of schedule. NCSN is the root Part 4 was quietly standing on; now the whole family tree is visible: **score matching (NCSN) and denoising diffusion (DDPM) are one framework, unified by the score.**
 
