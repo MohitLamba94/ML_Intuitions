@@ -191,7 +191,164 @@ def projection_and_compositing():
     save(fig, "gaussian_projection_compositing.jpg")
 
 
+def rasterization_vs_ray_tracing():
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), facecolor=BG)
+    for ax in axes:
+        ax.set_facecolor(BG)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis("off")
+
+    # Rasterization: start from scene primitives and determine covered pixels.
+    ax = axes[0]
+    ax.set_title("Rasterization: primitives to pixels", color=INK, fontsize=15,
+                 fontweight="bold", pad=14)
+    ax.add_patch(Polygon([[0.05, 0.46], [0.05, 0.54], [0.12, 0.50]],
+                         closed=True, facecolor=INK, edgecolor=INK))
+    ax.text(0.07, 0.61, "camera", ha="center", color=MUTED, fontsize=9)
+    plane_x = 0.28
+    ax.add_patch(Rectangle((plane_x, 0.20), 0.035, 0.60, facecolor="white",
+                           edgecolor=INK, lw=1.5))
+    for y in np.linspace(0.24, 0.76, 9):
+        ax.plot([plane_x, plane_x + 0.035], [y, y], color="#c3c7ce", lw=0.6)
+    triangles = [
+        ([[0.54, 0.28], [0.70, 0.43], [0.49, 0.50]], BLUE),
+        ([[0.59, 0.57], [0.79, 0.72], [0.76, 0.47]], GREEN),
+        ([[0.75, 0.28], [0.91, 0.40], [0.87, 0.60]], AMBER),
+    ]
+    for pts, color in triangles:
+        ax.add_patch(Polygon(pts, closed=True, facecolor=color, edgecolor=INK,
+                             lw=1.0, alpha=0.75))
+        centroid = np.mean(np.asarray(pts), axis=0)
+        ax.add_patch(FancyArrowPatch((centroid[0] - 0.02, centroid[1]),
+                                     (plane_x + 0.04, centroid[1]),
+                                     arrowstyle="-|>", mutation_scale=12,
+                                     color=color, lw=1.4, alpha=0.9))
+    ax.text(0.66, 0.85, "scene triangles", ha="center", color=INK,
+            fontsize=10, fontweight="bold")
+    ax.text(0.5, 0.08,
+            "Project each primitive, find the pixels it covers,\nthen shade those pixels.",
+            ha="center", color=MUTED, fontsize=10, linespacing=1.4)
+
+    # Ray tracing: start from pixels and search the scene for intersections.
+    ax = axes[1]
+    ax.set_title("Ray tracing: pixels to scene", color=INK, fontsize=15,
+                 fontweight="bold", pad=14)
+    ax.add_patch(Polygon([[0.05, 0.46], [0.05, 0.54], [0.12, 0.50]],
+                         closed=True, facecolor=INK, edgecolor=INK))
+    ax.text(0.07, 0.61, "camera", ha="center", color=MUTED, fontsize=9)
+    ax.add_patch(Rectangle((0.20, 0.20), 0.035, 0.60, facecolor="white",
+                           edgecolor=INK, lw=1.5))
+    for y in np.linspace(0.24, 0.76, 9):
+        ax.plot([0.20, 0.235], [y, y], color="#c3c7ce", lw=0.6)
+    surface = Polygon([[0.60, 0.24], [0.88, 0.35], [0.79, 0.68], [0.56, 0.58]],
+                      closed=True, facecolor="#d9a09b", edgecolor=INK, lw=1.0,
+                      alpha=0.75)
+    ax.add_patch(surface)
+    light = Circle((0.88, 0.82), 0.045, facecolor=AMBER, edgecolor="#a57216", lw=1.2)
+    ax.add_patch(light)
+    ax.text(0.88, 0.90, "light", ha="center", color=MUTED, fontsize=9)
+    rays = [(0.225, 0.34, 0.65, 0.36), (0.225, 0.49, 0.63, 0.49),
+            (0.225, 0.64, 0.68, 0.60)]
+    for x0, y0, x1, y1 in rays:
+        ax.add_patch(FancyArrowPatch((x0, y0), (x1, y1), arrowstyle="-|>",
+                                     mutation_scale=11, color=BLUE, lw=1.4))
+    hit = np.array([0.68, 0.60])
+    ax.add_patch(FancyArrowPatch(tuple(hit), (0.85, 0.78), arrowstyle="-|>",
+                                 mutation_scale=11, color=AMBER, lw=1.4,
+                                 linestyle="--"))
+    ax.text(0.48, 0.70, "primary rays", color=BLUE, fontsize=9)
+    ax.text(0.69, 0.08,
+            "Send a ray through each pixel, find what it hits,\nthen trace more rays for light, shadows, or reflections.",
+            ha="center", color=MUTED, fontsize=10, linespacing=1.4)
+
+    fig.subplots_adjust(wspace=0.08, left=0.02, right=0.98, top=0.84, bottom=0.05)
+    save(fig, "rasterization_vs_ray_tracing.jpg")
+
+
+def sfm_colmap_pipeline():
+    fig = base_figure(14, 6.4)
+    ax = fig.add_subplot(111)
+    ax.set_facecolor(BG)
+    ax.set_xlim(0, 14)
+    ax.set_ylim(0, 6.4)
+    ax.axis("off")
+
+    ax.text(7, 6.02, "Structure from Motion: recover cameras and sparse 3D points",
+            ha="center", color=INK, fontsize=17, fontweight="bold")
+    ax.text(7, 5.62,
+            "The same visual feature appears at different 2D locations; geometry explains all observations together.",
+            ha="center", color=MUTED, fontsize=10.5)
+
+    def pipeline_box(x, title, detail, color):
+        ax.add_patch(Rectangle((x, 0.45), 2.35, 1.18, facecolor="white",
+                               edgecolor=color, linewidth=2))
+        ax.text(x + 1.175, 1.34, title, ha="center", va="top", color=INK,
+                fontsize=10.5, fontweight="bold")
+        ax.text(x + 1.175, 0.67, detail, ha="center", va="bottom", color=MUTED,
+                fontsize=8.7, linespacing=1.25)
+
+    boxes = [
+        (0.25, "1. Detect features", "Distinctive corners\nand local descriptors", BLUE),
+        (3.05, "2. Match + verify", "Candidate correspondences\nthat obey camera geometry", CYAN),
+        (5.85, "3. Bootstrap", "Initialize two cameras\nand triangulate points", GREEN),
+        (8.65, "4. Grow model", "Register more cameras\nand triangulate tracks", AMBER),
+        (11.45, "5. Bundle adjustment", "Jointly refine cameras\nand 3D points", RED),
+    ]
+    for args in boxes:
+        pipeline_box(*args)
+    for x0, x1 in [(2.60, 3.05), (5.40, 5.85), (8.20, 8.65), (11.00, 11.45)]:
+        ax.add_patch(FancyArrowPatch((x0, 1.04), (x1, 1.04), arrowstyle="-|>",
+                                     mutation_scale=13, color=INK, lw=1.4))
+
+    # Three image planes observing the same scene point.
+    image_xs = [1.25, 4.05, 6.85]
+    feature_ys = [4.00, 4.40, 3.75]
+    for idx, (x, fy) in enumerate(zip(image_xs, feature_ys), start=1):
+        ax.add_patch(Rectangle((x, 2.73), 1.75, 2.15, facecolor="white",
+                               edgecolor=BLUE, lw=1.5))
+        ax.plot([x + 0.15, x + 1.60], [3.20, 4.60], color="#c4c9d1", lw=1)
+        ax.plot([x + 0.10, x + 1.55], [4.52, 3.12], color="#d3d6dc", lw=1)
+        ax.scatter([x + 0.82], [fy], s=50, color=RED, edgecolor="white",
+                   linewidth=0.8, zorder=4)
+        ax.scatter([x + 0.35, x + 1.35], [3.35, 4.55], s=25,
+                   color=[GREEN, AMBER], zorder=3)
+        ax.text(x + 0.875, 2.53, f"image {idx}", ha="center", color=MUTED, fontsize=9)
+    ax.text(4.90, 5.08, "matching red observations form one feature track",
+            ha="center", color=RED, fontsize=9.5, fontweight="bold")
+    ax.plot([2.07, 4.87], [feature_ys[0], feature_ys[1]], color=RED, lw=1.1,
+            linestyle="--", alpha=0.8)
+    ax.plot([4.87, 7.67], [feature_ys[1], feature_ys[2]], color=RED, lw=1.1,
+            linestyle="--", alpha=0.8)
+
+    # Reconstructed cameras and a triangulated 3D point.
+    point = (11.10, 4.00)
+    camera_centers = [(9.10, 3.05), (9.55, 4.70), (12.85, 3.10)]
+    for k, (cx, cy) in enumerate(camera_centers, start=1):
+        direction = np.array(point) - np.array([cx, cy])
+        direction = direction / np.linalg.norm(direction)
+        perp = np.array([-direction[1], direction[0]])
+        tip = np.array([cx, cy]) + direction * 0.38
+        base1 = np.array([cx, cy]) + perp * 0.16
+        base2 = np.array([cx, cy]) - perp * 0.16
+        ax.add_patch(Polygon([base1, base2, tip], closed=True,
+                             facecolor=BLUE, edgecolor=INK, lw=0.8, alpha=0.75))
+        ax.plot([tip[0], point[0]], [tip[1], point[1]], color=RED, lw=1,
+                linestyle="--", alpha=0.7)
+        ax.text(cx, cy - 0.30, f"camera {k}", ha="center", color=MUTED, fontsize=8.5)
+    ax.scatter([point[0]], [point[1]], s=90, color=RED, edgecolor="white",
+               linewidth=1.2, zorder=5)
+    ax.scatter([10.55, 11.55, 11.83, 10.80], [3.55, 3.35, 4.45, 4.62],
+               s=25, color=[GREEN, AMBER, PURPLE, CYAN], alpha=0.85)
+    ax.text(11.15, 5.08, "estimated poses + sparse point cloud",
+            ha="center", color=INK, fontsize=10, fontweight="bold")
+
+    save(fig, "sfm_colmap_pipeline.jpg")
+
+
 if __name__ == "__main__":
     representation_comparison()
     training_pipeline()
     projection_and_compositing()
+    rasterization_vs_ray_tracing()
+    sfm_colmap_pipeline()

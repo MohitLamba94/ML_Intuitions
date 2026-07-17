@@ -18,6 +18,9 @@ But a Gaussian splat is primarily an **appearance representation**, not automati
 
 ## Table of Contents
 
+- [Background](#background)
+  - [Rasterization vs. ray tracing](#rasterization-vs-ray-tracing)
+  - [Structure from Motion and COLMAP](#structure-from-motion-and-colmap)
 - [The problem: render viewpoints that were never photographed](#the-problem-render-viewpoints-that-were-never-photographed)
 - [Three ways to represent a scene](#three-ways-to-represent-a-scene)
 - [What exactly is a 3D Gaussian?](#what-exactly-is-a-3d-gaussian)
@@ -31,6 +34,106 @@ But a Gaussian splat is primarily an **appearance representation**, not automati
 - [Important follow-up ideas](#important-follow-up-ideas)
 - [A compact mental model](#a-compact-mental-model)
 - [Sources](#sources)
+
+---
+
+## Background
+
+Two older ideas sit underneath 3D Gaussian Splatting. The first is **rendering**: how a known 3D scene becomes a 2D image. The second is **Structure from Motion**: how overlapping 2D photographs can reveal camera positions and some 3D structure. 3DGS uses the first idea to draw its Gaussians and the second to initialize them in the right part of space.
+
+### Rasterization vs. ray tracing
+
+Both rasterization and ray tracing answer the same question: given a 3D scene and a camera, what color should each pixel have? The main difference is the direction in which they organize the work.
+
+![Rasterization starts from scene primitives and projects them toward the image, while ray tracing starts from image pixels and sends rays into the scene to find intersections and light paths.](./assets/rasterization_vs_ray_tracing.jpg){ width=100% }
+
+*Rasterization is primitive-driven: ask which pixels each primitive covers. Ray tracing is pixel-driven: ask what each pixel's ray encounters. Modern renderers often combine them. Original diagram, based on the pipeline descriptions in the Khronos OpenGL overview and NVIDIA's Ray Tracing Essentials.*
+
+#### Rasterization: project the scene onto the image
+
+Rasterization starts from geometric primitives, usually triangles:
+
+1. Transform each triangle's vertices from world coordinates into the camera's coordinate system.
+2. Project the triangle onto the 2D image plane.
+3. Find which pixels lie inside its projected footprint.
+4. Use a depth buffer to keep the nearest visible surface and run a shader to calculate its color.
+
+The key advantage is coherence: one projected triangle usually covers a block of nearby pixels, so GPUs can process those pixels efficiently in parallel. This is why rasterization became the foundation of real-time graphics.
+
+Rasterization does not naturally follow light as it bounces around the scene. Shadows, reflections, and indirect lighting are commonly approximated with extra techniques such as shadow maps, reflection maps, screen-space effects, or precomputed lighting. These approximations can be excellent, but each effect needs its own machinery.
+
+#### Ray tracing: search the scene from each pixel
+
+Ray tracing starts at the camera. For each pixel, it sends a **primary ray** through that pixel and finds the closest surface the ray intersects. Once it finds the surface, it can send more rays:
+
+- a shadow ray toward a light to check whether something blocks it;
+- a reflection ray in the mirror direction;
+- a refraction ray through glass;
+- additional sampled rays to estimate indirect illumination.
+
+This makes visibility, shadows, and reflections conceptually direct: follow the geometric paths that light could take. The cost is intersection search. Every ray must be tested against a large scene, and realistic lighting may require many secondary rays per pixel. Spatial acceleration structures and dedicated hardware make this much faster, but it is still generally more expensive than ordinary rasterization.
+
+**Path tracing** is a form of ray tracing that randomly samples complete light paths, including multiple bounces. With enough samples it can reproduce complex global illumination, but a small number of samples creates noise. Offline film renderers can spend many samples per pixel; real-time systems often use fewer samples plus denoising and a hybrid rasterization pipeline.
+
+| Question | Rasterization | Ray tracing |
+| --- | --- | --- |
+| Where does work begin? | Scene primitives | Image pixels or camera rays |
+| Main operation | Project a primitive and find covered pixels | Intersect a ray with the scene |
+| Major strength | Very fast, coherent real-time rendering | Natural visibility, shadows, reflections, and light transport |
+| Major difficulty | Complex lighting needs additional approximations | Many ray-scene intersection queries are expensive |
+| Common use | Games and interactive applications | Film rendering, high-quality lighting, and hybrid real-time effects |
+
+#### Where do NeRF and 3DGS fit?
+
+3DGS is **rasterization-like**. It starts from explicit Gaussians, projects each one into a 2D footprint, finds the image tiles and pixels it overlaps, and blends those pixels. The original implementation performs this work in custom CUDA rather than sending triangles through the GPU's fixed-function rasterizer, but the direction of work is still primitive-to-pixel.
+
+A basic NeRF is **ray-based**, but it is not ordinary surface ray tracing. It samples many locations along each camera ray and blends their predicted densities and colors using volume rendering. This is usually called **ray marching**. The basic NeRF renderer does not find one triangle intersection and then trace reflected or shadow rays. Keeping these terms separate makes the 3DGS-NeRF speed comparison easier to understand.
+
+### Structure from Motion and COLMAP
+
+Structure from Motion (SfM) solves an inverse problem. Rendering starts with known cameras and 3D structure and produces images. SfM starts with overlapping images and tries to recover the cameras and 3D structure that could have produced them.
+
+The word **motion** refers to camera motion across the photographs, not necessarily to moving objects. In fact, classical SfM works best when the scene itself remains still and only the camera moves.
+
+![Structure from Motion pipeline showing feature detection, matching and geometric verification, initialization from two cameras, incremental camera registration and triangulation, and bundle adjustment.](./assets/sfm_colmap_pipeline.jpg){ width=100% }
+
+*A feature seen in several images forms a track. SfM finds camera poses and a 3D point whose projections explain that track, then repeats this across many features. COLMAP packages these steps into a robust incremental pipeline. Original diagram, following the official COLMAP tutorial and Schoenberger and Frahm's incremental SfM system.*
+
+#### The basic SfM idea
+
+Suppose the corner of a window appears in three photographs. Its pixel coordinate differs in every image because the camera moved. If we knew the three camera poses, we could cast a ray from each camera through its observed pixel; the rays would meet near the window corner. This is **triangulation**.
+
+But initially we know neither the 3D corner nor the camera poses. SfM solves them together by finding many repeated visual features and searching for one geometric explanation that is consistent across the images.
+
+An incremental SfM pipeline usually follows five stages:
+
+1. **Detect and describe features.** Find distinctive local patterns such as corners and attach a descriptor that summarizes the surrounding image patch. The descriptor helps recognize the same feature after changes in viewpoint, scale, or brightness.
+2. **Match and geometrically verify them.** Find similar descriptors across image pairs, then reject matches that cannot be explained by one plausible camera-to-camera motion. This second check prevents visually similar but unrelated patches from corrupting the geometry.
+3. **Bootstrap from a good image pair.** Estimate the relative motion of two cameras and triangulate an initial set of 3D points.
+4. **Grow the reconstruction.** Register another image by matching its 2D features to existing 3D points, triangulate new feature tracks, and repeat.
+5. **Run bundle adjustment.** Jointly refine camera parameters and 3D point locations so that projecting every point back into its images lands as close as possible to the measured feature coordinates. This projection mismatch is called **reprojection error**.
+
+The result contains two kinds of camera parameters:
+
+- **Intrinsics** describe the camera itself, including focal length, principal point, and lens-distortion parameters.
+- **Extrinsics**, also called the camera pose, describe where the camera was and which direction it faced.
+
+The reconstructed points are called **sparse** because they exist only at reliably matched visual features. They are not a complete surface. For 3DGS that is enough: the points provide initial locations and colors, and Gaussian optimization later fills the visual gaps.
+
+#### What is COLMAP?
+
+**COLMAP** is a free, open-source system that implements both Structure from Motion and optional Multi-View Stereo. It provides graphical and command-line interfaces and is widely used as the camera-calibration front end for NeRF and 3DGS pipelines.
+
+For a standard 3DGS workflow, COLMAP typically supplies:
+
+- calibrated camera intrinsics;
+- one pose for each successfully registered photograph;
+- a sparse colored point cloud;
+- the visibility relationship between images and 3D points.
+
+COLMAP can continue into **Multi-View Stereo (MVS)**, which estimates dense depth maps and fuses them into a dense point cloud or mesh. Basic 3DGS training normally does **not** need this dense stage. It consumes the sparse SfM result and learns its own dense collection of Gaussians.
+
+SfM can fail before 3DGS training even begins. Common causes are motion blur, too little overlap, large textureless walls, repeated patterns such as identical windows, strong object motion, or drastic exposure changes. A good capture therefore moves around the scene gradually, keeps neighboring views overlapping, and records each surface from several angles.
 
 ---
 
