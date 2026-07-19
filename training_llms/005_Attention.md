@@ -16,6 +16,7 @@ The one cost this note does *not* address is that the $n \times n$ score matrix 
 - [Why divide by √dₖ](#why-divide-by-dₖ)
 - [Multi-head attention](#multi-head-attention)
 - [The head axis is just another batch axis](#the-head-axis-is-just-another-batch-axis)
+- [QK-Norm: bounding attention logits for stable training](#qk-norm-bounding-attention-logits-for-stable-training)
 - [MQA and GQA: shrinking the KV cache](#mqa-and-gqa-shrinking-the-kv-cache)
 - [Takeaways](#takeaways)
 - [Sources](#sources)
@@ -135,6 +136,46 @@ This is the sense in which "the head is an extra dimension you vectorize over": 
 
 ---
 
+## QK-Norm: bounding attention logits for stable training
+
+Recall the [$\sqrt{d_k}$ section](#why-divide-by-dₖ): dividing the scores by $\sqrt{d_k}$ fixes their variance to $\approx 1$ *at initialization*, assuming $q$ and $k$ have unit-variance entries. But that assumption only holds at the very start of training. As training proceeds, gradient descent is free to grow the weights $W^Q$ and $W^K$, which grows the norms $\lVert q \rVert$ and $\lVert k \rVert$, which grows the logits $q \cdot k$ — and the fixed $\sqrt{d_k}$ constant does nothing to stop it. So $\sqrt{d_k}$ is a one-time patch, not a running guarantee. **QK-Norm is the running guarantee.**
+
+### The failure mode: logit growth → attention entropy collapse
+
+At large scale this "logit drift" turns into an outright training-stability problem, and the mechanism is worth spelling out because it is the whole reason QK-Norm exists.
+
+1. **Logits grow unboundedly.** Somewhere in training, a few attention logits start drifting to very large magnitudes. In the ViT-22B work (Dehghani et al., 2023) the maximum attention logit was observed climbing past **50,000**.
+2. **Softmax saturates into one-hot.** Feed softmax a row whose top logit dwarfs the rest and it returns a near one-hot distribution — essentially all the weight on a single key. This is the same saturation the $\sqrt{d_k}$ section warned about, but now driven by trained weights, not head size.
+3. **Attention entropy collapses.** A one-hot distribution has near-zero entropy. When this happens across heads, the model has effectively stopped *mixing* information — every token copies one other token. This "attention entropy collapse" (Zhai et al., 2023, *Stabilizing Transformer Training by Preventing Attention Entropy Collapse*) is empirically correlated with the training going bad.
+4. **Training destabilizes.** Saturated softmax has vanishing gradients, huge logits interact badly with low precision (bf16/fp16 can overflow), and the result is **loss spikes and divergence** — the run either stalls or blows up.
+
+![Two panels sharing the story. Left, a log-scale plot of the maximum attention logit magnitude versus training progress: the "no QK-norm" curve climbs exponentially past a dashed line marked "one-hot softmax / fp16 overflow risk" at 50,000 and hits a red X marked "loss spike / divergence", while the "with QK-norm" curve stays flat and bounded near 10. Right, attention entropy as a fraction of its maximum versus training progress: the "no QK-norm" curve starts high (~0.9) and collapses toward ~0.05 (annotated "entropy collapse"), while the "with QK-norm" curve stays steady around 0.66.](../assets/attn_qknorm_stability.jpg)
+
+*Schematic illustration (stylized curves, not measured) of the mechanism reported by Dehghani et al. (2023, ViT-22B) and studied via small-scale proxies by Wortsman et al. (2024).*
+
+### The fix: normalize queries and keys before the dot product
+
+QK-Norm attacks the problem at its root — the *magnitude* of $q$ and $k$ — by normalizing them before they ever meet. There are two closely related forms:
+
+- **L2 / cosine form (Henry et al., 2020 — the original "QKNorm").** L2-normalize each query and key vector along the head dimension so they have unit length, then multiply the dot product by a single **learnable scalar** $g$ instead of dividing by $\sqrt{d_k}$:
+
+$$\mathrm{score}_{ij} = g \cdot \frac{q_i}{\lVert q_i \rVert} \cdot \frac{k_j}{\lVert k_j \rVert} = g \cdot \cos\theta_{ij}.$$
+
+  Reading it: once $q$ and $k$ are unit vectors, their dot product is exactly the **cosine of the angle** between them, which lives in $[-1, 1]$ no matter how large the underlying weights grow. The logit is therefore bounded in $[-g, g]$, and $g$ is learned — so the network can still choose how "sharp" attention is allowed to get, but it can never drift there by accident. This is why the paper frames it as making softmax "less prone to arbitrary saturation without sacrificing expressivity." Henry et al. reported gains averaging about +0.93 BLEU on low-resource translation, but the technique's lasting importance turned out to be *stability at scale*.
+- **LayerNorm/RMSNorm form (ViT-22B and most modern LLMs).** Apply a per-head LayerNorm (or RMSNorm) to $q$ and $k$ right after their projections, before $QK^\top$. This does not force exactly-unit vectors but it removes the runaway-magnitude degree of freedom, which is enough to keep logits in a sane range. Dehghani et al. found this let ViT-22B train stably across three orders of magnitude of learning rate — precisely the regime where the unnormalized model diverged.
+
+Either way the effect is the blue curves above: logits stay bounded, entropy stays healthy, and the run does not spike. QK-Norm has consequently become a near-default ingredient in recent large models.
+
+### Two refinements and one counterpoint
+
+The idea has been pushed further in three directions worth knowing, in decreasing order of how established they are:
+
+- **Combining QK-Norm with other stabilizers (Rybakov et al., 2024, *Methods of Improving LLM Training Stability*).** This work looks beyond attention logits at the L2 norm of *all* linear-layer outputs in a block, and finds the QKV, output-projection, and second-FFN layers grow the most under a high learning rate. It shows that pairing QK-LayerNorm with **softmax logit capping** (softly clamping the logits) — or normalizing after the QKV/FFN layers — lets you push the learning rate about **1.5× higher** than QK-Norm alone before divergence, with perplexity gains too. The takeaway: QK-Norm is necessary but not always sufficient; logit growth is one symptom of a broader magnitude-growth problem.
+- **Normalizing everything (nGPT, Loshchilov et al., 2024, *Normalized Transformer*).** nGPT takes normalization to its logical extreme: *every* vector — embeddings, attention and MLP weight rows, hidden states — is constrained to unit norm, so all representations live on a hypersphere and each layer is a small rotation on that sphere. QK-Norm falls out as a special case (queries and keys are already unit vectors). The reported payoff is dramatic optimization speed: **4–20× fewer training steps** to reach the same quality, with stable gradients as a built-in consequence of the geometry.
+- **A counterpoint — norm actually carries signal (NaLaFormer, Meng et al., 2025, *Norm-Aware Linear Attention*).** It is worth remembering that the query's *norm* is not pure noise. In softmax attention the query norm controls how *spiky* (low-entropy) that token's attention is — a large-norm query attends sharply, a small-norm one attends diffusely. Linear-attention variants (which drop the softmax to get $O(n)$ cost) accidentally throw this norm information away, causing an "entropy gap." NaLaFormer decouples each query/key into **norm** and **direction**, using the direction for matching and the norm to modulate spikiness on purpose. The lesson for QK-Norm: normalizing away the magnitude is a stability win, but the magnitude was doing a job, so aggressive normalization can cost a little expressivity — which is exactly why the practical forms keep a learnable scale $g$ to hand some of that control back.
+
+---
+
 ## MQA and GQA: shrinking the KV cache
 
 Everything so far is about *what attention computes*. MQA and GQA change *how much you have to store and move* when a trained model generates text — and to see why that matters, we build on [Why Hardware Makes Matrix Multiply Fast, Part 7](../gpu-tpu-matmul-flashattention.md#part-7--the-kv-cache-prefill-decode-and-why-inference-is-memory-bound), which covers the KV cache in detail. The short version of what that note establishes: when generating one token at a time (**decode**), the causal mask means each past token's key and value never change, so you compute them once and **cache** them; each new step then runs a single query against the whole cached $K, V$. That step does very little arithmetic but must **stream the entire KV cache out of memory**, so decode is **memory-bandwidth-bound** — its speed is set by how many bytes of cache you move per step, not by FLOPs. That note ends by pointing here, because the natural next question is: *can we make the cache smaller?*
@@ -191,6 +232,7 @@ From $g = 1$ (MQA) up to about $g = 8$ the decode time barely moves — the KV c
 - **The $\sqrt{d_k}$ scaling keeps softmax responsive.** Dot products of $d_k$-dimensional vectors have variance $\approx d_k$, so unscaled scores grow with head size and drive softmax into a saturated, near-zero-gradient regime. Dividing by $\sqrt{d_k}$ holds the score variance at $\approx 1$ regardless of $d_k$.
 - **Heads are parallel views on slices of the width.** With $d_k = d_{model}/h$, each head attends in its own subspace; concatenating and mixing with $W^O$ gives $h$ different context views at roughly the cost of one full-width head.
 - **The head axis behaves exactly like the batch axis.** Heads are independent, so reshaping to $(B, h, n, d_k)$ lets one batched matmul do all heads in a single GPU kernel — vectorizing away the slow per-head loop without changing the math.
+- **QK-Norm bounds the logits throughout training, not just at init.** $\sqrt{d_k}$ only fixes variance at initialization; as weights grow, logits drift, softmax saturates, attention entropy collapses, and the run diverges. Normalizing $q$ and $k$ (to cosine similarity, or via LayerNorm/RMSNorm) with a learnable scale caps the logits and keeps large-model training stable.
 - **MQA and GQA trade KV-cache bytes for a little quality.** Fewer KV heads ($g < h$) means a smaller cache to stream every decode step, which is what actually bottlenecks generation. GQA ($1 < g < h$) is the modern default; MQA ($g = 1$) is the aggressive extreme.
 - **The $n \times n$ matrix makes attention quadratic** in sequence length — the motivation for the whole efficient-attention literature, covered in the sequel [006 — Efficient Attention](./006_EffecientAttention.md).
 
@@ -203,6 +245,13 @@ From $g = 1$ (MQA) up to about $g = 8$ the decode time barely moves — the KV c
 - Ainslie et al. (2023), [*GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints*](https://arxiv.org/abs/2305.13245) (Grouped-Query Attention and how to uptrain it from a multi-head checkpoint).
 - Touvron et al. (2023), [*Llama 2: Open Foundation and Fine-Tuned Chat Models*](https://arxiv.org/abs/2307.09288) (uses GQA in the larger models).
 - Jiang et al. (2023), [*Mistral 7B*](https://arxiv.org/abs/2310.06825) (uses GQA together with sliding-window attention).
+- Henry et al. (2020), [*Query-Key Normalization for Transformers*](https://arxiv.org/abs/2010.04245) (the original QKNorm: L2-normalize $q,k$ to cosine attention with a learnable scale, avoiding softmax saturation).
+- Dehghani et al. (2023), [*Scaling Vision Transformers to 22 Billion Parameters*](https://openreview.net/pdf?id=Lhyy8H75KA) (attention-logit growth caused divergence at scale; QK-LayerNorm fixed it — the stability motivation).
+- Zhai et al. (2023), [*Stabilizing Transformer Training by Preventing Attention Entropy Collapse*](https://arxiv.org/abs/2303.06296) (names and analyzes the entropy-collapse failure mode).
+- Wortsman et al. (2024), [*Small-scale proxies for large-scale Transformer training instabilities*](https://arxiv.org/abs/2309.14322) (reproduces logit growth in small models and studies QK-norm / logit clipping fixes).
+- Rybakov et al. (2024), [*Methods of Improving LLM Training Stability*](https://arxiv.org/abs/2410.16682) (QK-norm plus softmax capping / extra normalization allows ~1.5× higher learning rate).
+- Loshchilov et al. (2024), [*nGPT: Normalized Transformer with Representation Learning on the Hypersphere*](https://arxiv.org/abs/2410.01131) (normalizes all vectors to unit norm; QK-norm as a special case; 4–20× faster convergence).
+- Meng et al. (2025), [*NaLaFormer: Norm-Aware Linear Attention*](https://arxiv.org/abs/2506.21137) (query norm controls attention spikiness; restores it in linear attention — a counterpoint on why magnitude matters).
 - Jay Alammar, [*The Illustrated Transformer*](https://jalammar.github.io/illustrated-transformer/) (the standard visual walkthrough of multi-head attention and data flow).
 - Lilian Weng (2018), [*Attention? Attention!*](https://lilianweng.github.io/posts/2018-06-24-attention/) (a broad technical survey of attention mechanisms and their evolution).
 - Sebastian Raschka, [*Understanding Multi-Head, Multi-Query, and Grouped-Query Attention*](https://magazine.sebastianraschka.com/) (a clear, code-oriented explainer of the three variants).

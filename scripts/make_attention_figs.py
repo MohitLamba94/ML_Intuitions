@@ -8,6 +8,7 @@ Outputs (all .jpg, per repo convention):
   assets/attn_gqa_perf_vs_time.jpg    -- Ainslie et al. 2023 Fig 3 (recreated from paper data)
   assets/attn_gqa_uptraining.jpg      -- Ainslie et al. 2023 Fig 5 (recreated from paper data)
   assets/attn_gqa_time_vs_groups.jpg  -- Ainslie et al. 2023 Fig 6 (recreated from paper data)
+  assets/attn_qknorm_stability.jpg    -- schematic: logit growth -> entropy collapse, QK-norm fix
 
 The three GQA-paper figures are pgfplots/TikZ figures in the arXiv source (not
 raster images), so we recreate them in matplotlib using the exact data points
@@ -467,6 +468,65 @@ def fig_gqa_time_vs_groups():
     save(fig, "attn_gqa_time_vs_groups.jpg")
 
 
+# ---------------------------------------------------------------------------
+# 8. Schematic (illustrative, not measured): without QK-norm, attention logits
+#    grow unbounded during training and softmax collapses to one-hot (attention
+#    entropy -> 0), triggering loss spikes; QK-norm bounds the logits so entropy
+#    stays healthy. Curves are stylized to convey the mechanism reported by
+#    Dehghani et al. (ViT-22B) and Wortsman et al.
+# ---------------------------------------------------------------------------
+def fig_qknorm_stability():
+    steps = np.linspace(0, 1, 200)
+    # left: max attention logit magnitude (log scale)
+    logit_no = 8.0 * 10 ** (3.8 * steps)          # blows up toward ~50k
+    logit_norm = 9.0 + 1.2 * np.sin(steps * 25)   # bounded, small wiggle
+    # right: attention entropy as a fraction of its max (ln n)
+    ent_no = 0.05 + 0.85 / (1 + np.exp(16 * (steps - 0.62)))
+    ent_norm = 0.66 + 0.02 * np.sin(steps * 20)
+
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(12.5, 4.5))
+
+    axL.semilogy(steps, logit_no, color=C["orange"], lw=2.4,
+                 label="no QK-norm")
+    axL.semilogy(steps, logit_norm, color=C["blue"], lw=2.4,
+                 label="with QK-norm")
+    axL.axhline(5e4, color=C["grey"], ls="--", lw=1.2)
+    axL.text(0.02, 6.5e4, "one-hot softmax / fp16 overflow risk",
+             fontsize=8.5, color=C["grey"])
+    # divergence marker where the unnormalised curve blows up
+    axL.scatter([0.9], [8.0 * 10 ** (3.8 * 0.9)], marker="x", s=120,
+                color="#c0392b", lw=2.5, zorder=5)
+    axL.annotate("loss spike /\ndivergence", (0.9, 8.0 * 10 ** (3.8 * 0.9)),
+                 xytext=(-70, -6), textcoords="offset points", fontsize=9,
+                 color="#c0392b", ha="right")
+    axL.set_ylim(1, 2e5)
+    axL.set_xlabel("training progress", fontsize=11)
+    axL.set_ylabel("max attention logit  $|q\\cdot k|$  (log)", fontsize=11)
+    axL.set_title("Logits grow without bound...", fontsize=12,
+                  fontweight="bold", color=C["text"])
+    axL.legend(fontsize=10, frameon=False, loc="center right")
+    axL.spines[["top", "right"]].set_visible(False)
+
+    axR.plot(steps, ent_no, color=C["orange"], lw=2.4, label="no QK-norm")
+    axR.plot(steps, ent_norm, color=C["blue"], lw=2.4, label="with QK-norm")
+    axR.set_ylim(0, 1.0)
+    axR.set_xlabel("training progress", fontsize=11)
+    axR.set_ylabel("attention entropy (fraction of max)", fontsize=11)
+    axR.set_title("...so softmax collapses to one-hot\n(attention entropy → 0)",
+                  fontsize=12, fontweight="bold", color=C["text"])
+    axR.annotate("entropy collapse", (0.72, 0.12), xytext=(0.30, 0.30),
+                 fontsize=9.5, color=C["orange"],
+                 arrowprops=dict(arrowstyle="-|>", color=C["orange"], lw=1.4))
+    axR.legend(fontsize=10, frameon=False, loc="center left")
+    axR.spines[["top", "right"]].set_visible(False)
+
+    fig.suptitle("Why QK-norm helps: bounding the logits keeps softmax "
+                 "responsive instead of saturating into instability",
+                 fontsize=13, fontweight="bold", color=C["text"])
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    save(fig, "attn_qknorm_stability.jpg")
+
+
 if __name__ == "__main__":
     fig_matmul_flow()
     fig_sqrt_dk()
@@ -475,4 +535,5 @@ if __name__ == "__main__":
     fig_gqa_perf_vs_time()
     fig_gqa_uptraining()
     fig_gqa_time_vs_groups()
+    fig_qknorm_stability()
     print("done.")
