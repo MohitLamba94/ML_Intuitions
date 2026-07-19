@@ -148,7 +148,39 @@ The two named methods are just the endpoints and middle of one knob — the numb
 
 ![Three side-by-side diagrams, each with a row of 8 query heads (Q1–Q8) on top and a row of KV heads on the bottom, with lines showing which query heads read which KV head. Left, MHA (g = h): 8 query heads, 8 KV heads, one-to-one. Middle, GQA (1 < g < h): 8 query heads but only 2 KV heads, with Q1–Q4 sharing KV1 and Q5–Q8 sharing KV2 (query heads coloured by their group). Right, MQA (g = 1): all 8 query heads fan into a single shared KV head. Title: fewer KV heads means a smaller KV cache to stream each decode step, MHA to GQA to MQA.](../assets/attn_mha_mqa_gqa.jpg)
 
-So the spectrum is $g = h$ (full multi-head, biggest cache, best quality) $\to$ $1 < g < h$ (GQA) $\to$ $g = 1$ (MQA, smallest cache, fastest, some quality risk). GQA has become the default in modern open LLMs precisely because it sits at the sweet spot: **Llama 2 70B, Llama 3, and Mistral 7B all use GQA**, while pure MQA appears in models like PaLM and Falcon. In every case the motivation is the same one from the KV-cache note — decode is bottlenecked on memory bandwidth, so the winning move is to move fewer bytes.
+So the spectrum is $g = h$ (full multi-head, biggest cache, best quality) $\to$ $1 < g < h$ (GQA) $\to$ $g = 1$ (MQA, smallest cache, fastest, some quality risk). The rest of this section unpacks the three results from the GQA paper (Ainslie et al., 2023) that pin down *why GQA, and why $g$ around 8*, using their T5-Large / T5-XXL experiments (T5-XXL has $h = 64$ heads, so "MHA" here means 64 KV heads).
+
+### The quality–speed tradeoff: GQA gets XXL quality at MQA speed
+
+The headline result is a single quality-vs-speed plot. The authors take a pretrained multi-head T5-XXL checkpoint, convert it to MQA and to GQA-8 (i.e. $g = 8$), *uptrain* each with just 5% of the original pre-training compute, and measure both average task quality and inference time per sample against plain multi-head T5-Large and T5-XXL.
+
+![A scatter plot of average performance (y, roughly 45.7 to 47.4) versus time per sample (x). MHA-XXL sits far right (slowest, ~1.5 relative time) at the top quality ~47.2. MHA-Large is bottom-left-ish (fast, ~0.37) but clearly lower quality ~46.0. MQA-XXL is far left (fastest, ~0.24) at quality ~46.6. GQA-XXL is also far left (~0.28, nearly as fast as MQA) but at quality ~47.1, essentially matching MHA-XXL.](../assets/attn_gqa_perf_vs_time.jpg)
+
+*Figure recreated from Ainslie et al. (2023), "GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints" (arXiv:2305.13245), Figure 3, using the paper's data points. Reproduced for educational purposes.*
+
+Read the four points as a story. **MHA-XXL** (top right) is the quality ceiling but also the slowest — its full 64-head KV cache is expensive to stream. **MHA-Large** (bottom) is fast simply because it is a smaller model, but it pays for that in quality. The interesting two are on the far left: **MQA-XXL** is the fastest of all, and lands well above MHA-Large in quality — so even the aggressive one-KV-head variant is a *favorable* trade. **GQA-XXL** is the punchline: it is nearly as fast as MQA yet sits right up at MHA-XXL's quality. You essentially get the big model's accuracy at the small model's latency. That is why GQA, not MQA, became the default.
+
+### You don't retrain from scratch — you *uptrain*
+
+A crucial practical point is that MQA/GQA models are not trained from zero. You start from an existing multi-head checkpoint, **mean-pool** the $h$ key (and value) projection matrices within each group down to $g$ of them, and then continue training for a *small fraction* of the original pre-training budget to let the model adjust. This "uptraining" is what makes converting a released MHA model cheap. The second result measures how much uptraining you actually need:
+
+![A line plot of performance (y) versus uptraining proportion (x, from 0 to 0.1, i.e. 0% to 10% of pre-training compute). A dotted horizontal line marks the original multi-head model's performance (~57.5). The GQA-8 curve (squares) starts high at ~56.7 with zero uptraining and quickly rises to meet the MHA line by ~5%. The MQA curve (triangles) starts much lower at ~53.9 with no uptraining and climbs steeply, reaching ~56.9 at 5% and only approaching MHA near 10%.](../assets/attn_gqa_uptraining.jpg)
+
+*Figure recreated from Ainslie et al. (2023), Figure 5, using the paper's data points. Reproduced for educational purposes.*
+
+Two things jump out. First, **GQA-8 starts far higher** than MQA at zero uptraining (~56.7 vs ~53.9): keeping 8 KV heads instead of collapsing to 1 preserves much more of the original model's structure, so there is simply less to repair. Second, **GQA-8 recovers essentially all of the multi-head quality with very little uptraining** — it is already at the dotted MHA reference line by about 5% — whereas MQA needs noticeably more uptraining to close the gap and still trails slightly. So GQA is not only better at inference; it is *cheaper and safer to convert to*.
+
+### Why $g \approx 8$: the cost of adding groups is not symmetric
+
+If GQA-8 already matches MHA quality, why not push $g$ higher for even more quality headroom? Because the *speed* cost of adding KV heads is highly non-linear. The third result times decoding as a function of the number of groups:
+
+![A line plot of decode time per sample in seconds (y) versus the number of GQA groups g (x, log scale: 1, 4, 8, 16, 32, 64), for input length 2048 and output length 512. A dotted line at ~2.53 s marks full multi-head (64 groups); a dotted line at ~0.49 s marks MQA (1 group). The GQA curve is almost flat and low from g=1 through g=8 (~0.49 to ~0.51 s), a shaded "cheap zone" region, then rises — ~0.59 at 16, ~0.80 at 32, and snapping up to ~2.53 at 64 (which equals MHA).](../assets/attn_gqa_time_vs_groups.jpg)
+
+*Figure recreated from Ainslie et al. (2023), Figure 6, using the paper's data points. Reproduced for educational purposes.*
+
+From $g = 1$ (MQA) up to about $g = 8$ the decode time barely moves — the KV cache is still small enough that streaming it is cheap, so those extra groups are nearly free. Past 8, the curve turns up sharply, and by $g = 64$ (which *is* full multi-head) you are back to the slow ~2.5 s. So the two curves together define the sweet spot: quality is essentially saturated by $g \approx 8$ (previous figure), while speed is still essentially free there (this figure). Choosing $g$ in that low range buys you MHA-level quality while staying on the flat part of the cost curve — exactly why real models land on a handful of KV heads rather than one or all.
+
+**In practice.** GQA has become the default in modern open LLMs precisely because it sits at this sweet spot: **Llama 2 70B, Llama 3, and Mistral 7B all use GQA** (Llama 2 70B, for instance, uses 8 KV heads), while pure MQA appears in models like PaLM and Falcon. In every case the motivation is the same one from the KV-cache note — decode is bottlenecked on memory bandwidth, so the winning move is to move fewer bytes.
 
 ---
 

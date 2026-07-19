@@ -5,6 +5,14 @@ Outputs (all .jpg, per repo convention):
   assets/attn_sqrt_dk.jpg       -- why 1/sqrt(d_k): softmax saturation as d_k grows
   assets/attn_multihead.jpg     -- split d_model into h heads, attend, concat, W^O
   assets/attn_mha_mqa_gqa.jpg   -- MHA vs GQA vs MQA head-sharing
+  assets/attn_gqa_perf_vs_time.jpg    -- Ainslie et al. 2023 Fig 3 (recreated from paper data)
+  assets/attn_gqa_uptraining.jpg      -- Ainslie et al. 2023 Fig 5 (recreated from paper data)
+  assets/attn_gqa_time_vs_groups.jpg  -- Ainslie et al. 2023 Fig 6 (recreated from paper data)
+
+The three GQA-paper figures are pgfplots/TikZ figures in the arXiv source (not
+raster images), so we recreate them in matplotlib using the exact data points
+extracted from arXiv:2305.13245 (figures/results.tex, uptraining_steps.tex,
+time_vs_groups.tex). Credit Ainslie et al. (2023).
 
 Run with the repo 'general' conda env:
   /Users/mohitl/Documents/miniconda3/envs/general/bin/python scripts/make_attention_figs.py
@@ -357,9 +365,114 @@ def fig_mha_mqa_gqa():
     save(fig, "attn_mha_mqa_gqa.jpg")
 
 
+# ---------------------------------------------------------------------------
+# 5. Ainslie et al. (2023) Figure 3: quality vs speed. Recreated from the exact
+#    coordinates in the arXiv source (figures/results.tex). Uptrained MQA/GQA
+#    on T5-XXL sit far to the left (fast) at near-MHA-XXL quality.
+# ---------------------------------------------------------------------------
+def fig_gqa_perf_vs_time():
+    # (time per sample, performance) straight from results.tex
+    pts = {
+        "MHA-Large": (0.372, 45.95,  C["grey"]),
+        "MHA-XXL":   (1.514, 47.206, C["grey"]),
+        "MQA-XXL":   (0.239, 46.571, C["orange"]),
+        "GQA-XXL":   (0.275, 47.136, C["blue"]),
+    }
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    for name, (t, p, col) in pts.items():
+        ax.scatter([t], [p], s=130, color=col, edgecolor=C["grey"],
+                   linewidth=1.0, zorder=3)
+    # annotations positioned to avoid overlap
+    ax.annotate("MHA-Large", (0.372, 45.95), xytext=(8, -4),
+                textcoords="offset points", fontsize=10, color=C["text"])
+    ax.annotate("MHA-XXL", (1.514, 47.206), xytext=(-8, -14),
+                textcoords="offset points", fontsize=10, color=C["text"],
+                ha="right")
+    ax.annotate("MQA-XXL", (0.239, 46.571), xytext=(10, -3),
+                textcoords="offset points", fontsize=10, color=C["text"])
+    ax.annotate("GQA-XXL", (0.275, 47.136), xytext=(10, 2),
+                textcoords="offset points", fontsize=10, color=C["text"])
+    ax.set_xlim(0.0, 1.95)
+    ax.set_ylim(45.65, 47.40)
+    ax.set_xlabel("Time per sample (relative)", fontsize=11)
+    ax.set_ylabel("Average performance", fontsize=11)
+    ax.set_title("5%-uptrained MQA/GQA-8 keep almost all MHA-XXL quality\n"
+                 "at a fraction of MHA-XXL's decoding time",
+                 fontsize=12, fontweight="bold", color=C["text"])
+    ax.grid(True, ls="--", color="#dddddd", lw=0.8)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, "attn_gqa_perf_vs_time.jpg")
+
+
+# ---------------------------------------------------------------------------
+# 6. Ainslie et al. (2023) Figure 5: performance vs uptraining proportion for
+#    T5-XXL. Data from figures/uptraining_steps.tex. GQA-8 recovers quality with
+#    far less uptraining than MQA, and lands right on the MHA reference line.
+# ---------------------------------------------------------------------------
+def fig_gqa_uptraining():
+    prop = [0.0, 0.05, 0.1]
+    gqa = [56.713, 57.4, 57.56]
+    mqa = [53.93, 56.92, 57.153]
+    mha_ref = 57.537
+    fig, ax = plt.subplots(figsize=(7.2, 4.3))
+    ax.axhline(mha_ref, color=C["grey"], ls=":", lw=2.4,
+               label="MHA (reference)")
+    ax.plot(prop, gqa, "s-", color=C["blue"], lw=2.2, ms=7, label="GQA-8")
+    ax.plot(prop, mqa, "^-", color=C["orange"], lw=2.2, ms=8, label="MQA")
+    ax.set_xlabel("Uptraining proportion (fraction of pre-training)", fontsize=11)
+    ax.set_ylabel("Performance", fontsize=11)
+    ax.set_title("GQA-8 needs far less uptraining than MQA to recover\n"
+                 "multi-head quality from an MHA checkpoint",
+                 fontsize=12, fontweight="bold", color=C["text"])
+    ax.grid(True, ls="--", color="#dddddd", lw=0.8)
+    ax.legend(fontsize=10, frameon=False, loc="lower right")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, "attn_gqa_uptraining.jpg")
+
+
+# ---------------------------------------------------------------------------
+# 7. Ainslie et al. (2023) Figure 6: decode time per sample vs number of GQA
+#    groups (log x), input 2048 / output 512. Data from time_vs_groups.tex.
+#    1 (MQA) -> 8 groups is nearly flat; past 8 the cost climbs toward MHA.
+# ---------------------------------------------------------------------------
+def fig_gqa_time_vs_groups():
+    groups = [1, 4, 8, 16, 32, 64]
+    gqa_t = [0.489, 0.476, 0.514, 0.594, 0.800, 2.531]
+    mqa_t = 0.489   # 1 group
+    mha_t = 2.531   # 64 groups == full multi-head
+    fig, ax = plt.subplots(figsize=(7.6, 4.3))
+    # shade the "cheap" region 1..8 groups
+    ax.axvspan(1, 8, color=C["green"], alpha=0.10)
+    ax.axhline(mha_t, color=C["grey"], ls=":", lw=2.4, label="MHA")
+    ax.axhline(mqa_t, color=C["orange"], ls=":", lw=2.0, label="MQA")
+    ax.plot(groups, gqa_t, "s-", color=C["blue"], lw=2.2, ms=7, label="GQA")
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(groups)
+    ax.set_xticklabels([str(g) for g in groups])
+    ax.set_xlim(0.9, 70)
+    ax.set_ylim(0, 2.8)
+    ax.set_xlabel("Number of GQA groups $g$ (log scale)", fontsize=11)
+    ax.set_ylabel("Time per sample (s)", fontsize=11)
+    ax.set_title("1 (MQA) → 8 groups is nearly free; beyond 8 the cost\n"
+                 "climbs back toward full multi-head (64 groups)",
+                 fontsize=12, fontweight="bold", color=C["text"])
+    ax.text(2.6, 0.72, "cheap zone\n(1–8 groups)", fontsize=9,
+            style="italic", color=C["green"], ha="center")
+    ax.grid(True, ls="--", color="#dddddd", lw=0.8)
+    ax.legend(fontsize=10, frameon=False, loc="upper left")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, "attn_gqa_time_vs_groups.jpg")
+
+
 if __name__ == "__main__":
     fig_matmul_flow()
     fig_sqrt_dk()
     fig_multihead()
     fig_mha_mqa_gqa()
+    fig_gqa_perf_vs_time()
+    fig_gqa_uptraining()
+    fig_gqa_time_vs_groups()
     print("done.")
