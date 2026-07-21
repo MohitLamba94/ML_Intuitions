@@ -19,7 +19,8 @@ We assume you are comfortable with what a matrix multiply *is* and with undergra
 - [Part 4 — TPUs and the systolic array](#part-4--tpus-and-the-systolic-array)
 - [Part 5 — A100 → H100 → B200: what changed and why](#part-5--a100--h100--b200-what-changed-and-why)
 - [Part 6 — FlashAttention: same math, far less data movement](#part-6--flashattention-same-math-far-less-data-movement)
-- [Part 7 — The KV cache: prefill, decode, and why inference is memory-bound](#part-7--the-kv-cache-prefill-decode-and-why-inference-is-memory-bound)
+- [Part 7 — Kernel fusion and Triton: how you actually write a data-light kernel](#part-7--kernel-fusion-and-triton-how-you-actually-write-a-data-light-kernel)
+- [Part 8 — The KV cache: prefill, decode, and why inference is memory-bound](#part-8--the-kv-cache-prefill-decode-and-why-inference-is-memory-bound)
 - [Sources](#sources)
 
 ---
@@ -264,7 +265,53 @@ The takeaway ties the whole note into one bow: **FlashAttention does the exact s
 
 ---
 
-## Part 7 — The KV cache: prefill, decode, and why inference is memory-bound
+## Part 7 — Kernel fusion and Triton: how you actually write a data-light kernel
+
+FlashAttention (Part 6) is one hand-crafted masterpiece. But its core trick — *do the whole computation in one pass without round-tripping intermediate results through HBM* — is a **general** technique with a name (**kernel fusion**) and, these days, a tool that lets ordinary people write such kernels without becoming CUDA experts (**Triton**). This part is the "how the sausage is made" companion to the rest of the note: the same move — move less data — expressed at the level of the code you actually write.
+
+### 7.1 What a kernel is, and why launching many small ones is slow
+
+A **kernel** is just a function that runs on the GPU. In eager PyTorch, *each* tensor operation is typically its own kernel: one for the multiply, one for the add, one for the activation, one for the layer-norm. A line like `y = sigmoid(x * w + b)` is not one GPU call — it is three, run back to back.
+
+Two costs pile up when you do this, and both are the ghosts of Part 2:
+
+- **HBM round-trips for intermediates.** Each kernel reads its inputs from HBM and writes its output back to HBM. So the temporary `x*w` is written all the way out to slow HBM, only to be immediately read back in by the very next kernel to add `b` — and again for the sigmoid. These intermediate tensors never needed to leave the chip, yet the naive pipeline shuttles every one of them through the slowest level of the hierarchy.
+- **Launch overhead.** Every kernel launch carries a fixed CPU→GPU dispatch cost. For big matmuls this is negligible, but for the swarm of tiny elementwise ops in a real model it adds up, and it hurts most exactly when the tensors are small.
+
+And notice *which* operations dominate here: activations, bias-adds, scaling, dropout, normalization. These are **elementwise** (or near-elementwise) ops with arithmetic intensity around 1 — one or two FLOPs per element loaded. By the roofline of Part 2 they are deeply **memory-bound**: the arithmetic is trivial, so runtime is set almost entirely by the HBM traffic. Making the GPU's FLOPs faster does nothing; the fix has to be *fewer bytes moved*.
+
+### 7.2 Fusion: do the whole chain in one pass, staying on-chip
+
+The fix is exactly FlashAttention's, generalized: **merge the chain of operations into a single kernel.** Load each input from HBM *once*, carry out the entire sequence of arithmetic while the values sit in fast registers / SRAM, and write only the *final* result back. Every intermediate stays on-chip and never touches HBM.
+
+Take the same `sigmoid(x*w + b)`. Unfused, it is 3 kernels and roughly **8 memory operations** (read `x`, `w`, write the product; read it back with `b`, write the sum; read it back, write the sigmoid). Fused, it is **1 kernel and 4 memory operations** (read the three inputs once, write one result) — about **half the memory traffic and a third of the launches**, for the exact same math. That is the entire win, and it is Part 2 in miniature.
+
+![Two panels contrasting unfused vs fused execution of sigmoid(x*w + b). Left "UNFUSED — 3 kernels": three separate kernel boxes (multiply, add, sigmoid) stacked, each with a red arrow reading its inputs down from an HBM bar and a red arrow writing its output back up to HBM, so the intermediates x*w and (x*w+b) make a full round trip; tallied count "~8 HBM transfers, 3 launches". Right "FUSED — 1 kernel": a single tall kernel box that reads x, w, b once from HBM (one set of blue down-arrows), runs multiply→add→sigmoid entirely inside a shaded "registers / SRAM (on-chip)" region with no HBM arrows between the steps, and writes one result back up; tallied "~4 HBM transfers, 1 launch". A caption reads: same math, half the memory traffic — intermediates never leave the chip.](./assets/kernel_fusion.jpg){ width=100% }
+*Kernel fusion collapses a chain of memory-bound elementwise ops into one pass: inputs are read once, the whole computation happens in registers, and only the final result is written back — so the intermediates never round-trip through HBM. FlashAttention (Part 6) is this idea pushed to its limit on the attention block. (Recreated in our notation; cf. the PyTorch "Why is torch.compile so fast: kernel fusion" blog.)*
+
+FlashAttention is simply this at the extreme: the *whole* attention block — $QK^\top$, softmax, and the $\times V$ — is fused into one kernel so the $N\times N$ scores matrix never round-trips. Fusion comes in a few recognizable flavors: **vertical** (a chain where each op's output feeds the next, as above), **horizontal** (several independent ops on the same input, done together), and **epilogue** fusion (a GEMM with its bias/activation tacked onto the end so the matmul's output is post-processed *before* it is written out).
+
+### 7.3 Who does the fusing: `torch.compile` and Inductor
+
+You could hand-write every fused kernel, but you rarely need to. `torch.compile()` traces your model into a graph, and its **Inductor** backend automatically spots fusible groups of operations and generates a single fused kernel for each. Crucially, the code it emits is not CUDA — its default target is **Triton**. So the everyday path to fusion is: write ordinary PyTorch, wrap it in `torch.compile`, and let the compiler collapse your elementwise chains into fused Triton kernels for you. (You can inspect what it generated with `TORCH_LOGS="output_code"`.)
+
+### 7.4 Triton: writing GPU kernels in Python, at the *tile* level
+
+When automatic fusion isn't enough — a novel attention variant, a custom activation, a fused normalization — you write the kernel yourself. Historically that meant **CUDA C++**: maximal control, but you personally manage thread indices, shared-memory bank conflicts, memory-coalescing patterns, and warp synchronization. It is expert work and slow to get right.
+
+**Triton** (open-sourced by OpenAI in 2021) changes the abstraction level. You write **Python**, and — this is the key idea — you program at the level of a **tile** (a block of the tensor), not a single thread. Your code says *load this tile from HBM (`tl.load`), do arithmetic on it, store the result back (`tl.store`)*. The compiler then handles everything below that line: how threads are laid out within the block, how shared memory is allocated, how loads are coalesced, when warps synchronize, and which hardware instructions to emit — including automatically firing the asynchronous **TMA** loads on Hopper/Blackwell that we met in Part 5, with no extra code. On top of that, `@triton.autotune` will benchmark a menu of tile sizes and warp counts on the first run and cache whichever is fastest.
+
+The mental model is a clean division of labor: **in CUDA you place every thread; in Triton you place every tile and the compiler places the threads.** You trade a sliver of peak control for a large gain in productivity, and for the great majority of kernels Triton lands within striking distance of hand-tuned CUDA.
+
+The canonical teaching example is, fittingly, a **fused softmax**. PyTorch's `F.softmax` launches separate kernels for the exponential, the sum-reduction, and the divide, each round-tripping through HBM. A Triton kernel fuses all three into one load-compute-store pass; on an H100 this roughly doubles the achieved bandwidth (~350 → ~820 GB/s, about **2.3×**) purely by halving HBM traffic — the softmax version of the same lesson. This is why Triton now sits under so much of the stack: it is the default codegen of `torch.compile`, and FlashAttention variants, vLLM's operators (PagedAttention, RoPE, RMSNorm — see Part 8), and libraries like Liger-Kernel are all written in it.
+
+### 7.5 The takeaway
+
+Kernel fusion is the whole note's thesis restated at the level of the code you write: **the pump is fast, the pipe is the limit, so chain your operations and touch HBM as few times as you can.** FlashAttention was the heroic hand-built instance; fusion is the general principle; `torch.compile` applies it automatically; and Triton is how you write a custom one without hand-placing a single thread.
+
+---
+
+## Part 8 — The KV cache: prefill, decode, and why inference is memory-bound
 
 FlashAttention (Part 6) made *training* attention fast. But when you actually *use* a trained model — generating text one token at a time — a different inefficiency dominates, and the fix, the **KV cache**, is again a pure data-movement trick. This part is where the note's thesis finally lands on the thing you interact with every day: an LLM answering a prompt.
 
@@ -330,6 +377,9 @@ Both are the same move we have seen all note long, now applied to inference: **t
 - **Jouppi et al., "In-Datacenter Performance Analysis of a Tensor Processing Unit" (ISCA 2017).** The systolic array, the deterministic design philosophy, and the CPU/GPU/TPU comparison. arXiv:1704.04760 — <https://arxiv.org/abs/1704.04760>
 - **Dao, Fu, Ermon, Rudra, Ré, "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness" (NeurIPS 2022).** IO-awareness, tiling + online softmax, recomputation, and the SRAM/HBM numbers. arXiv:2205.14135 — <https://arxiv.org/abs/2205.14135>
 - **NVIDIA Blackwell (B100/B200) architecture** — vendor materials and secondary summaries for the dual-die design, HBM3e, and the second-gen Transformer Engine / FP4. <https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/>
+- **OpenAI — "Introducing Triton: Open-source GPU programming for neural networks" (2021).** The tile-level (block, not thread) programming model, what the compiler automates, and the fused-softmax / matmul examples. <https://openai.com/index/triton/>
+- **PyTorch — "Why is `torch.compile` so fast: kernel fusion."** Vertical/horizontal/epilogue fusion, the memory-traffic and launch-overhead argument, the worked `x*w+b→sigmoid` example, and Inductor's use of Triton as its codegen backend. <https://pytorch.org/blog/why-is-pytorch-compile-so-fast-kernel-fusion/>
+- **Spheron — "OpenAI Triton Kernel Development on GPU Cloud" (2026 guide).** Practical Triton programming model, autotuning, TMA on Hopper/Blackwell, and the H100 fused-softmax bandwidth numbers. <https://www.spheron.network/blog/openai-triton-kernel-gpu-cloud-2026/>
 - **HuggingFace — "KV Cache from Scratch in nanoVLM."** Why the cache exists, prefill vs decode, and a from-scratch PyTorch implementation with the generation loop. <https://huggingface.co/blog/kv-cache>
 - **HuggingFace — "The KV Cache: How It Eliminates Redundancy" (atharv6f).** Concise conceptual take on what gets cached, why only K/V, and the memory-vs-compute tradeoff. <https://huggingface.co/blog/atharv6f/kv-cache-basics>
 

@@ -264,13 +264,47 @@ If you naively reuse a small model's learning rate on a big model, it's **wrong*
 
 Anecdotally the field leans slightly toward the scaling-law philosophy, but both are viable; the advanced lecture treats them in depth.
 
-### 6.6 Caution: downstream can be less predictable
+### 6.6 Aside: what *is* perplexity?
 
-An honest asterisk [Tay et al 2023]: upstream loss (perplexity) scales cleanly and nearly linearly with parameters, but **downstream task metrics** are far shakier — accuracy tends to follow a **sigmoid** in compute (hence the "emergence" look) and can even *reorder models*. Tay's striking example: on perplexity a model they call **NL12** looks best, but the actually-better downstream model was **NL32XL** — worse in perplexity, better on the task. So upstream→downstream transfer is much less certain than the clean perplexity plots suggest.
+I keep saying scaling laws are cleanest on "loss" or "perplexity." Since that word shows up everywhere in LM papers, here's a self-contained explainer.
+
+**Start from what the model outputs.** A language model, at each position, produces a **probability distribution over the next token** given everything before it: $p(x_t \mid x_{<t})$. A *good* model puts high probability on the token that actually came next. So a natural quality score is: over a held-out text, how much probability did the model assign to the true continuation? We summarize that with the **average negative log-probability** per token — which is exactly the **cross-entropy loss**:
+
+$$L \;=\; -\frac{1}{T}\sum_{t=1}^{T} \log p(x_t \mid x_{<t}),$$
+
+where $T$ is the number of tokens in the evaluation text. This $L$ (in **nats**, if you use natural log) is the *very same* loss plotted on the y-axis of every scaling-law figure in this note.
+
+**Perplexity is just that, exponentiated:**
+
+$$\boxed{\;\text{Perplexity} \;=\; e^{L} \;=\; \exp\!\Big(-\tfrac{1}{T}\sum_t \log p(x_t \mid x_{<t})\Big)\;}$$
+
+So perplexity and loss carry *identical information* — perplexity only moves you from "log space" back to "probability space," where the number has a concrete meaning.
+
+**The intuition — effective branching factor.** Perplexity answers: *on average, how many equally-likely choices is the model deciding among at each step?* A perplexity of 10 means the model is about as uncertain as if it were picking uniformly at random from **10 options** every token. This is why it's called the **weighted branching factor**: the raw branching factor is the whole vocabulary $V$ (say 50,000 tokens), but a trained model has narrowed its real uncertainty down to an *effective* handful.
+
+![Two bar charts of the next-token distribution for the context "The cat sat on the ___", over eight candidate words. Left, a "confident model": most probability mass is on "mat" (~0.62) with a little on "sofa", giving cross-entropy H ≈ 1.27 nats and perplexity ≈ 3.6 — as if choosing among ~4 words. Right, an "uncertain model": probability is spread nearly flatly across all eight words, giving H ≈ 2.05 nats and perplexity ≈ 7.8 — as if choosing among ~8 words. A dotted line marks the uniform 1/V level. The caption stresses perplexity = effective branching factor.](../assets/scale_perplexity_intuition.jpg)
+
+**Its range, and the two anchors.**
+* **Best case, perplexity = 1:** the model is *certain* and always right — it put probability 1 on the actual next token ($L = 0$). One choice, no confusion.
+* **Worst case, perplexity = $V$:** the model is clueless and predicts *uniformly* over the whole vocabulary; then it's genuinely choosing among all $V$ tokens ($L = \log V$). For a 50k-token vocab that's perplexity 50,000.
+* A decent modern LM sits far down toward the good end — cross-entropy around 2–3 nats, i.e. perplexity roughly **7–20**.
+
+![A plot of perplexity (y, log scale) versus cross-entropy loss L in nats per token (x), showing the exponential curve perplexity = e^L. Reference points are marked: L=0 → perplexity 1 ("perfect: 1 choice"); L≈2 → perplexity ≈7 ("good LM"); L=3 → perplexity ≈20 ("weaker LM"); and L=log(50000)≈10.8 → perplexity 50,000 ("uniform over 50k-token vocab, worst case"). The x-axis is annotated "the y-axis of scaling-law plots", making explicit that scaling-law loss is just log-perplexity. A note reads "lower is better (fewer effective choices)".](../assets/scale_perplexity_vs_loss.jpg)
+
+**What does perplexity depend on?** Three things, and this is the crucial part:
+1. **The model** — a better model assigns higher probability to real text, so *lower* perplexity. This is the sense in which "perplexity measures the model."
+2. **The evaluation dataset** — perplexity is always measured *on a particular held-out corpus*. The same model has different perplexity on Wikipedia vs. code vs. legal text (out-of-distribution text is more "surprising," raising perplexity). So a perplexity number is meaningless without saying *on what data*.
+3. **The tokenizer / vocabulary — the big gotcha.** Perplexity here is *per token*, but what counts as a "token" depends on the tokenizer. A model with a bigger vocabulary packs more text into each token, which changes per-token perplexity even for identical underlying quality. **You therefore cannot compare perplexities across models with different tokenizers** — it's apples to oranges. (This is why cross-model comparisons often switch to bits-per-byte or per-character, which are tokenizer-independent.)
+
+**Why scaling-law people love it.** Perplexity (equivalently, cross-entropy loss) is a *smooth, continuous, low-variance* number. Because pretraining eval sets are huge and homogeneous, re-running gives essentially the same value (variance out in the second or third decimal), so each point on a scaling-law plot can be a **single run** with no averaging needed. That smoothness is precisely what makes the clean straight lines — and reliable extrapolation — possible. Contrast this with **accuracy**, which is discontinuous (a prediction is right or wrong) and jumpy, and you'll see why laws are fit on perplexity, not on task scores.
+
+### 6.7 Caution: downstream can be less predictable
+
+This is where the perplexity discussion (§6.6) pays off. Call perplexity (equivalently, pretraining loss) the **upstream** metric, and benchmark accuracy on real tasks the **downstream** metric. An honest asterisk [Tay et al 2023]: upstream loss scales cleanly and nearly linearly with parameters, but **downstream task metrics** are far shakier — accuracy tends to follow a **sigmoid** in compute (hence the "emergence" look) and can even *reorder models*. Tay's striking example: on perplexity a model they call **NL12** looks best, but the actually-better downstream model was **NL32XL** — worse in perplexity, better on the task. So upstream→downstream transfer is much less certain than the clean perplexity plots suggest.
 
 The practical philosophy Percy gives: **anchor your scaling law on the low-variance quantity (perplexity)** — it's clean, regular, single-run repeatable — and then *separately* establish that it transfers to the capability you care about. Don't skip that second step: "the perplexity is good, it's your problem now" is how pre-training teams hand a subtly broken model to post-training. Scaling laws are strongest on the smooth quantity (loss) and weakest on the thing you ultimately ship (capabilities).
 
-### 6.7 The surprising takeaway
+### 6.8 The surprising takeaway
 
 The effect of **optimizer, depth, architecture** on a huge LM can be **predicted before training it** — by fitting laws on small models and extrapolating. That is a genuinely surprising and enormously money-saving fact.
 
@@ -384,3 +418,4 @@ The IsoFLOP recipe is so clean it now shows up far beyond text LMs — **diffusi
 - Kaplan et al 2020, *Scaling Laws for Neural Language Models* ([arXiv:2001.08361](https://arxiv.org/abs/2001.08361)).
 - Hoffmann et al 2022 (Chinchilla), *Training Compute-Optimal Large Language Models* ([arXiv:2203.15556](https://arxiv.org/abs/2203.15556)).
 - Also referenced: Cortes/Vapnik et al 1993 (Bell Labs), Banko & Brill 2001, Kolachina+ 2012, Rosenfeld+ 2020, Bahri+ 2021, Hashimoto 2021, Muennighoff+ 2023 (data repetition), Tay+ 2022/2023 (architecture & downstream), Yang+ 2022 (µP), Yao+ 2024; on the Kaplan–Chinchilla gap: Porian/Yair+ 2024 (*Resolving Discrepancies…*), Pearce & Song 2024, and Besiroglu+ 2024 / Epoch AI (Chinchilla replication).
+- On perplexity (§6.6): [Perplexity in Language Models (C. Campagnola)](https://medium.com/data-science/perplexity-in-language-models-87a196019a94), [Perplexity: the standard intrinsic metric for LLM quality (ZeroEntropy)](https://zeroentropy.dev/concepts/perplexity/), [Understanding Perplexity — an information-theory view (The Latent Variable)](https://thelatentvariable.substack.com/p/understanding-perplexity-an-information).

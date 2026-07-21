@@ -19,9 +19,11 @@ Figures for `gpu-tpu-matmul-flashattention.md` (hardware / matmul / FlashAttenti
          multiply (AI ~ 1); tiling loads a block into SRAM once and reuses each
          value T times (AI ~ T) -- how tiling manufactures arithmetic intensity. -> Part 1
   Fig 8  KV cache: without a cache every step recomputes all K/V (wasted); with
-         a cache only the new token's K/V is computed and appended.          -> Part 7
+         a cache only the new token's K/V is computed and appended.          -> Part 8
   Fig 9  prefill vs decode: one wide compute-bound prefill GEMM followed by a
-         run of thin memory-bound decode steps reading the growing cache.    -> Part 7
+         run of thin memory-bound decode steps reading the growing cache.    -> Part 8
+  Fig 10 kernel fusion: unfused chain of elementwise kernels each round-tripping
+         HBM vs one fused kernel that keeps the intermediates on-chip.        -> Part 7
 
 Pure numpy/matplotlib (no sklearn/torch). Deterministic (seeded). All numbers are
 approximate, vendor-published, A100/H100/B200-class values (see note for citations).
@@ -567,6 +569,86 @@ def fig_prefill_decode():
     _save(fig, "prefill_vs_decode.jpg")
 
 
+def fig_kernel_fusion():
+    """Unfused (3 kernels round-tripping HBM) vs fused (1 kernel, on-chip). -> Part 7"""
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(12, 5.2))
+    for ax in (axL, axR):
+        _bare(ax)
+        ax.set_xlim(0, 10); ax.set_ylim(0, 10)
+
+    def hbm_bar(ax):
+        ax.add_patch(Rectangle((0.4, 0.4), 9.2, 1.1, facecolor=BLUE, alpha=0.22,
+                               edgecolor=INK2, linewidth=1.0))
+        ax.text(5.0, 0.95, "HBM (slow, off-chip)", ha="center", va="center",
+                color=BLUE, fontsize=10, weight="bold")
+
+    def arrow(ax, x0, y0, x1, y1, color, lw=1.4):
+        ax.add_patch(FancyArrowPatch((x0, y0), (x1, y1), arrowstyle="-|>",
+                     mutation_scale=12, color=color, lw=lw))
+
+    # ---------------- LEFT: unfused, 3 kernels each round-tripping HBM
+    hbm_bar(axL)
+    labels = ["multiply\n(x*w)", "add\n(+b)", "sigmoid"]
+    xs = [1.6, 4.5, 7.4]
+    w = 2.0
+    for x, lab in zip(xs, labels):
+        axL.add_patch(Rectangle((x, 4.4), w, 2.2, facecolor=RED, alpha=0.45,
+                                edgecolor=INK, linewidth=1.4))
+        axL.text(x + w / 2, 5.5, lab, ha="center", va="center", color=INK,
+                 fontsize=10, weight="bold")
+        # read up from HBM, write back down to HBM
+        arrow(axL, x + w * 0.35, 1.55, x + w * 0.35, 4.35, RED)
+        arrow(axL, x + w * 0.65, 4.35, x + w * 0.65, 1.55, INK2)
+        axL.text(x + w * 0.20, 3.0, "read", ha="center", color=RED, fontsize=8, rotation=90)
+        axL.text(x + w * 0.80, 3.0, "write", ha="center", color=INK2, fontsize=8, rotation=90)
+    # intermediates labelled as HBM round-trips between kernels
+    axL.text((xs[0] + w + xs[1]) / 2, 5.5, "x*w", ha="center", color=INK2, fontsize=9, style="italic")
+    axL.text((xs[1] + w + xs[2]) / 2, 5.5, "x*w+b", ha="center", color=INK2, fontsize=9, style="italic")
+    arrow(axL, xs[0] + w, 5.5, xs[1], 5.5, INK2, lw=1.0)
+    arrow(axL, xs[1] + w, 5.5, xs[2], 5.5, INK2, lw=1.0)
+    axL.text(5.0, 8.7, "UNFUSED  —  3 kernels", ha="center", color=RED,
+             fontsize=13, weight="bold")
+    axL.text(5.0, 7.9, "every intermediate round-trips through HBM",
+             ha="center", color=INK2, fontsize=10)
+    axL.text(5.0, 0.0, "~8 HBM transfers   ·   3 launches", ha="center",
+             color=RED, fontsize=10.5, weight="bold")
+
+    # ---------------- RIGHT: fused, one kernel, on-chip
+    hbm_bar(axR)
+    # single tall kernel box with a shaded on-chip region inside
+    axR.add_patch(Rectangle((2.0, 3.4), 6.0, 4.2, facecolor=AQUA, alpha=0.16,
+                            edgecolor=INK, linewidth=1.6))
+    axR.text(5.0, 7.15, "FUSED KERNEL", ha="center", color=AQUA, fontsize=11,
+             weight="bold")
+    # on-chip registers/SRAM region
+    axR.add_patch(Rectangle((2.6, 3.8), 4.8, 2.7, facecolor=AMBER, alpha=0.18,
+                            edgecolor=AMBER, linewidth=1.2, linestyle="--"))
+    axR.text(5.0, 6.15, "registers / SRAM (on-chip)", ha="center", color="#b9791f",
+             fontsize=9, style="italic")
+    # the chain, entirely inside, no HBM arrows between steps
+    axR.text(5.0, 5.3, "multiply  ->  add  ->  sigmoid", ha="center", va="center",
+             color=INK, fontsize=11, weight="bold")
+    axR.text(5.0, 4.55, "intermediates stay in registers", ha="center",
+             color=INK2, fontsize=8.5)
+    # read the 3 inputs once, write 1 result
+    for i, (x, lab) in enumerate(zip([2.9, 3.7, 4.5], ["x", "w", "b"])):
+        arrow(axR, x, 1.55, x, 3.35, AQUA)
+        axR.text(x, 2.55, lab, ha="center", color=AQUA, fontsize=9, weight="bold")
+    axR.text(2.2, 2.55, "read\nonce", ha="center", va="center", color=AQUA, fontsize=8)
+    arrow(axR, 7.2, 3.35, 7.2, 1.55, INK2)
+    axR.text(7.2, 2.55, "result", ha="center", color=INK2, fontsize=9, weight="bold")
+    axR.text(5.0, 8.7, "FUSED  —  1 kernel", ha="center", color=AQUA,
+             fontsize=13, weight="bold")
+    axR.text(5.0, 7.9, "same math, intermediates never leave the chip",
+             ha="center", color=INK2, fontsize=10)
+    axR.text(5.0, 0.0, "~4 HBM transfers   ·   1 launch", ha="center",
+             color=AQUA, fontsize=10.5, weight="bold")
+
+    fig.suptitle("Kernel fusion:  y = sigmoid(x*w + b)  —  half the memory traffic for the same arithmetic",
+                 color=INK, fontsize=12.5, y=0.99)
+    _save(fig, "kernel_fusion.jpg")
+
+
 if __name__ == "__main__":
     fig_roofline()
     fig_tiling_reuse()
@@ -578,4 +660,5 @@ if __name__ == "__main__":
     fig_flash_tiling()
     fig_kv_cache()
     fig_prefill_decode()
+    fig_kernel_fusion()
     print("done")
