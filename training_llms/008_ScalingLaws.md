@@ -2,6 +2,46 @@
 
 > Based on Stanford CS336 (Percy Liang), Lecture 9 — *Scaling Laws: Basics* — plus the original papers it draws on (Hestness 2017, Kaplan 2020, Hoffmann/Chinchilla 2022).
 
+## Table of Contents
+
+- [The one question this whole topic answers](#the-one-question-this-whole-topic-answers)
+- [Setup and Notation](#setup-and-notation)
+- [1. What a scaling law actually *is*](#1-what-a-scaling-law-actually-is)
+- [2. A brief history (skim — expand on request)](#2-a-brief-history-skim--expand-on-request)
+- [3. The three questions neural scaling answers](#3-the-three-questions-neural-scaling-answers)
+- [4. Data scaling — and *why* it's a power law](#4-data-scaling--and-why-its-a-power-law)
+  - [4.1 Toy example: estimating a mean](#41-toy-example-estimating-a-mean)
+  - [4.2 The mystery: classical slope is $-1$, neural slopes are much shallower](#42-the-mystery-classical-slope-is--1-neural-slopes-are-much-shallower)
+  - [4.3 The resolution: nonparametric learning has dimension-dependent slopes](#43-the-resolution-nonparametric-learning-has-dimension-dependent-slopes)
+  - [4.4 The intrinsic-dimensionality theory](#44-the-intrinsic-dimensionality-theory)
+  - [4.5 Recap of the theory arc](#45-recap-of-the-theory-arc)
+- [5. Advanced data scaling (medium depth)](#5-advanced-data-scaling-medium-depth)
+  - [5.1 Distribution shift: composition changes the *offset*, not the *slope*](#51-distribution-shift-composition-changes-the-offset-not-the-slope)
+  - [5.2 Data repetition: when you run out of fresh tokens](#52-data-repetition-when-you-run-out-of-fresh-tokens)
+  - [5.3 The rest, briefly (expand on request)](#53-the-rest-briefly-expand-on-request)
+  - [5.4 Recap: data scaling](#54-recap-data-scaling)
+- [6. Using scaling laws to set hyperparameters](#6-using-scaling-laws-to-set-hyperparameters)
+  - [6.1 Architecture — Transformers vs LSTMs, and shape](#61-architecture--transformers-vs-lstms-and-shape)
+  - [6.2 Optimizer — Adam vs SGD](#62-optimizer--adam-vs-sgd)
+  - [6.3 Depth/width and the "value of a parameter"](#63-depthwidth-and-the-value-of-a-parameter)
+  - [6.4 Critical batch size (deep — subtle and often misunderstood)](#64-critical-batch-size-deep--subtle-and-often-misunderstood)
+  - [6.5 Learning rate and initialization — muP (deep)](#65-learning-rate-and-initialization--mup-deep)
+  - [6.6 Aside: what *is* perplexity?](#66-aside-what-is-perplexity)
+  - [6.7 Caution: downstream can be less predictable](#67-caution-downstream-can-be-less-predictable)
+  - [6.8 The surprising takeaway](#68-the-surprising-takeaway)
+- [7. Joint data–model scaling and compute-optimal training (Chinchilla)](#7-joint-datamodel-scaling-and-compute-optimal-training-chinchilla)
+  - [7.1 Joint scaling laws](#71-joint-scaling-laws)
+  - [7.2 The compute-optimal frontier — and the famous disagreement](#72-the-compute-optimal-frontier--and-the-famous-disagreement)
+  - [7.3 Chinchilla's three fitting methods](#73-chinchillas-three-fitting-methods)
+  - [7.4 Why did Kaplan and Chinchilla differ?](#74-why-did-kaplan-and-chinchilla-differ)
+  - [7.5 Fun addendum: Chinchilla's Method 3 was itself flawed](#75-fun-addendum-chinchillas-method-3-was-itself-flawed)
+  - [7.6 The catch: train-optimal is *not* deployment-optimal](#76-the-catch-train-optimal-is-not-deployment-optimal)
+  - [7.7 IsoFLOPs everywhere](#77-isoflops-everywhere)
+- [8. Recap — surprising and useful](#8-recap--surprising-and-useful)
+- [Sources](#sources)
+
+---
+
 ## The one question this whole topic answers
 
 Imagine a friend hands you **ten thousand B200 GPUs for one month** and says: *build a good open-source language model.* You assemble an infra team, you curate a great pretraining dataset — and then you hit the wall that this note is about: **which model do you actually train?**
@@ -296,7 +336,25 @@ So perplexity and loss carry *identical information* — perplexity only moves y
 2. **The evaluation dataset** — perplexity is always measured *on a particular held-out corpus*. The same model has different perplexity on Wikipedia vs. code vs. legal text (out-of-distribution text is more "surprising," raising perplexity). So a perplexity number is meaningless without saying *on what data*.
 3. **The tokenizer / vocabulary — the big gotcha.** Perplexity here is *per token*, but what counts as a "token" depends on the tokenizer. A model with a bigger vocabulary packs more text into each token, which changes per-token perplexity even for identical underlying quality. **You therefore cannot compare perplexities across models with different tokenizers** — it's apples to oranges. (This is why cross-model comparisons often switch to bits-per-byte or per-character, which are tokenizer-independent.)
 
+The rest of this aside zooms out to *why perplexity matters as an evaluation metric* — it's a slight digression from scaling laws, but it's the context that makes the metric worth caring about.
+
+**Perplexity as the most natural evaluation — and the in-distribution → out-of-distribution shift.** Evaluation asks a deceptively simple question: *given the model we trained, how good is it?* The hard part is turning an **abstract construct** ("good at reasoning," "good at conversation") into a **concrete metric**. Perplexity is the most natural starting point because a language model *is* a distribution $p(x)$ over token sequences, and the obvious way to score a distribution is: *how much probability mass does it place on held-out text?* (normalized per token — exactly perplexity). Throughout the 2010s this was done **in-distribution**: train on the train split and test on the test split of a fixed corpus (Penn Treebank, WikiText-103, the One Billion Word Benchmark), and progress was literally reported as *perplexity reduction* — the 2016 result applying CNNs/LSTMs to the 1B-word benchmark was the first definitive "pure neural clearly beats n-grams." **GPT-2 (2019)** changed the paradigm: trained on WebText (~40 GB of Reddit-linked pages) and evaluated **zero-shot, out-of-distribution** on those standard datasets — e.g. ~35 perplexity on tiny PTB versus a SOTA of ~46, despite never training on it. That normalized today's setup: train on a huge corpus, evaluate on standard benchmarks.
+
+**"Perplexity is all you need" — the belief behind scaling.** Here's the (half-serious) argument that drove a lot of scaling faith. There's some true distribution $t$ that generates language. The *best possible* perplexity is the **entropy of $t$**, and it's achieved *uniquely* when your model $p = t$. So driving perplexity down relentlessly pushes $p$ toward $t$ — and once you've *got* the true distribution, you can model everything: condition on a question and generate the answer, condition on a problem and generate the solution. Hence "push perplexity low enough and, eventually, good things (even AGI) follow." Fantastical or not, this is exactly the kind of conviction behind the "scaling as a belief system" stance from §1 — it kept people scaling before GPT-3, when the payoff was far from obvious.
+
+**...but perplexity can be *more* than you need.** The flip side: perplexity charges you on **every token equally**, whether or not the token is interesting. In *"Stanford was founded in 1885,"* predicting **1885** is a genuine knowledge probe (Q&A disguised as sentence completion), but **was**, or the first word, are incidental — yet perplexity penalizes deviations on all of them the same.
+
+![A bar chart of per-token surprisal (negative log-base-2 probability, in bits) for the sentence "Stanford was founded in 1885". Bars: Stanford 3.1, was 0.5, founded 2.0, in 0.4, and a tall highlighted 1885 at 6.8, marked as the informative token / knowledge probe. A dashed line marks the average surprisal (the cross-entropy), annotated that perplexity = 2 to that average. Caption: perplexity charges for every token equally, including the incidental ones; only "1885" is really informative.](../assets/scale_perplexity_token_surprisal.jpg)
+
+The fix is **conditional perplexity**: condition on a prompt and score only the perplexity of the *response*, concentrating the metric on the tokens you actually care about and ignoring incidental ones.
+
+**Some benchmarks are perplexity in disguise.** Several "accuracy" benchmarks are really next-token prediction underneath. **LAMBADA** (2016) is fill-in-the-blank, deliberately built so the missing word can only be resolved with **long-range context** — scored as accuracy but fundamentally perplexity on one carefully chosen token (the early GPT papers loved it precisely because it stresses long-context modeling). **HellaSwag** is multiple-choice sentence completion — "which continuation fits best" is just "which continuation does the model find least perplexing." Choosing positions that demand long-distance dependencies is a way to *sharpen* perplexity toward a capability you care about.
+
+**The leaderboard trust problem.** Perplexity has one awkward property as a public metric: it deals in *distributions*. A perplexity leaderboard asks entrants to return logprobs on your test data, and you must **trust those probabilities form a valid distribution that sums to 1**. Nothing stops a cheater from returning probability 1 (logprob 0) on everything for a perfect score — which is not a valid distribution at all, and is hard to catch without inspecting their code. **Downstream tasks sidestep this**: treat the model as a black box (prompt in, response out) and compute accuracy — no distributional trust required. (Worse still for models like VAEs that only yield a *bound* on the likelihood — you then have to trust the math of the bound too.)
+
 **Why scaling-law people love it.** Perplexity (equivalently, cross-entropy loss) is a *smooth, continuous, low-variance* number. Because pretraining eval sets are huge and homogeneous, re-running gives essentially the same value (variance out in the second or third decimal), so each point on a scaling-law plot can be a **single run** with no averaging needed. That smoothness is precisely what makes the clean straight lines — and reliable extrapolation — possible. Contrast this with **accuracy**, which is discontinuous (a prediction is right or wrong) and jumpy, and you'll see why laws are fit on perplexity, not on task scores.
+
+**Bottom line.** Perplexity is still used heavily in LM development and is the metric of choice for scaling laws precisely because it varies smoothly with scale. But it lives on the *distribution* side of the world, and — unless you're a true believer — a low perplexity alone won't convince anyone your model is actually *good* at real tasks. For that you need **benchmarks**, which is exactly the upstream-vs-downstream gap we turn to next.
 
 ### 6.7 Caution: downstream can be less predictable
 

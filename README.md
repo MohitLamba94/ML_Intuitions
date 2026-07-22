@@ -140,6 +140,7 @@ This repository contains personal notes and learning material. The goal is to bu
   - [Part 6 — FlashAttention: same math, far less data movement](gpu-tpu-matmul-flashattention.md#part-6--flashattention-same-math-far-less-data-movement)
   - [Part 7 — Kernel fusion and Triton: how you actually write a data-light kernel](gpu-tpu-matmul-flashattention.md#part-7--kernel-fusion-and-triton-how-you-actually-write-a-data-light-kernel)
   - [Part 8 — The KV cache: prefill, decode, and why inference is memory-bound](gpu-tpu-matmul-flashattention.md#part-8--the-kv-cache-prefill-decode-and-why-inference-is-memory-bound)
+  - [Part 9 — The math of compute- vs memory-bound: arithmetic intensity, latency, and throughput](gpu-tpu-matmul-flashattention.md#part-9--the-math-of-compute--vs-memory-bound-arithmetic-intensity-latency-and-throughput)
   - [Sources](gpu-tpu-matmul-flashattention.md#sources)
 
 - **[Training-Free Image Editing in Diffusion and Flow Models](training-free-image-editing.md)**
@@ -291,6 +292,6 @@ This repository contains personal notes and learning material. The goal is to bu
     - [7.6 The catch: train-optimal is *not* deployment-optimal](training_llms/008_ScalingLaws.md#76-the-catch-train-optimal-is-not-deployment-optimal)
     - [7.7 IsoFLOPs everywhere](training_llms/008_ScalingLaws.md#77-isoflops-everywhere)
   - [8. Recap — surprising and useful](training_llms/008_ScalingLaws.md#8-recap--surprising-and-useful)
-    - [Sources](training_llms/008_ScalingLaws.md#sources)
+  - [Sources](training_llms/008_ScalingLaws.md#sources)
 
 <!-- END AUTO-TOC -->

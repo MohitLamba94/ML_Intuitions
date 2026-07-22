@@ -569,6 +569,65 @@ def fig_prefill_decode():
     _save(fig, "prefill_vs_decode.jpg")
 
 
+def fig_latency_throughput():
+    """Latency & throughput vs batch size for Llama-2-13B on an H100. -> Part 9"""
+    # Llama-2-13B-class config, bf16, context S = 1024
+    V, D, F, L = 32000, 5120, 13824, 40
+    N, K, H = 40, 40, 128          # query heads, kv heads (MHA here), head dim
+    S = 1024
+    bw = 3.35e12                   # H100 HBM bandwidth, bytes/s
+    hbm = 80e9                     # H100 capacity, bytes
+
+    P = 2 * V * D + 3 * D * F * L + (2 * D * N * H + 2 * D * K * H) * L
+    w_bytes = 2 * P                                  # bf16 weights
+    kv_per_seq = 2 * 2 * S * K * H * L               # 2(K,V) * 2 bytes * S * KH * L
+
+    b = np.logspace(0, np.log10(256), 200)
+    mem = w_bytes + b * kv_per_seq
+    lat_ms = mem / bw * 1e3
+    thru = b / (mem / bw)
+    b_cliff = (hbm - w_bytes) / kv_per_seq            # ~64
+
+    fig, axL = plt.subplots(figsize=(9.2, 5.2))
+    _style(axL)
+    axL.set_xscale("log")
+    axL.plot(b, lat_ms, color=BLUE, lw=2.4, label="latency (ms/token)")
+    axL.set_xlabel(r"batch size  $n_\mathrm{batch}$  (concurrent requests, log scale)", color=INK2, fontsize=10)
+    axL.set_ylabel("latency  (ms / token)", color=BLUE, fontsize=10)
+    axL.tick_params(axis="y", colors=BLUE)
+
+    axR = axL.twinx()
+    for s in ("top",):
+        axR.spines[s].set_visible(False)
+    axR.plot(b, thru, color=AQUA, lw=2.4, label="throughput (tok/s)")
+    axR.set_ylabel("throughput  (tokens / s)", color=AQUA, fontsize=10)
+    axR.tick_params(axis="y", colors=AQUA, labelsize=9)
+
+    # memory cliff
+    axL.axvline(b_cliff, color=RED, ls="--", lw=1.4)
+    axL.axvspan(b_cliff, 256, color=RED, alpha=0.10)
+    axL.text(b_cliff * 1.05, axL.get_ylim()[1] * 0.55,
+             "exceeds 80 GB HBM\n" + r"($n_\mathrm{batch} > $" + f"{b_cliff:.0f}: does not fit)",
+             color=RED, fontsize=9, weight="bold", va="center")
+
+    # markers at B = 1, 64, 256
+    for bi in (1, 64, 256):
+        m = w_bytes + bi * kv_per_seq
+        li = m / bw * 1e3
+        ti = bi / (m / bw)
+        axL.plot(bi, li, "o", color=BLUE, ms=6, zorder=5)
+        axR.plot(bi, ti, "o", color=AQUA, ms=6, zorder=5)
+        axL.annotate(r"$n_\mathrm{batch}$=" + f"{bi}\n{li:.0f} ms, {ti:.0f} tok/s",
+                     xy=(bi, li), xytext=(0, -34 if bi != 256 else 12),
+                     textcoords="offset points", ha="center", color=INK2, fontsize=8)
+
+    axL.set_xlim(1, 256); axL.set_ylim(0, lat_ms.max() * 1.1)
+    axR.set_ylim(0, thru.max() * 1.12)
+    axL.set_title("Latency vs throughput vs batch size  —  Llama-2-13B on one H100 "
+                  "(bf16, context 1024 tokens)", color=INK, fontsize=11.5)
+    _save(fig, "latency_throughput_batch.jpg")
+
+
 def fig_kernel_fusion():
     """Unfused (3 kernels round-tripping HBM) vs fused (1 kernel, on-chip). -> Part 7"""
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(12, 5.2))
@@ -661,4 +720,5 @@ if __name__ == "__main__":
     fig_kv_cache()
     fig_prefill_decode()
     fig_kernel_fusion()
+    fig_latency_throughput()
     print("done")

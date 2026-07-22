@@ -21,6 +21,7 @@ We assume you are comfortable with what a matrix multiply *is* and with undergra
 - [Part 6 — FlashAttention: same math, far less data movement](#part-6--flashattention-same-math-far-less-data-movement)
 - [Part 7 — Kernel fusion and Triton: how you actually write a data-light kernel](#part-7--kernel-fusion-and-triton-how-you-actually-write-a-data-light-kernel)
 - [Part 8 — The KV cache: prefill, decode, and why inference is memory-bound](#part-8--the-kv-cache-prefill-decode-and-why-inference-is-memory-bound)
+- [Part 9 — The math of compute- vs memory-bound: arithmetic intensity, latency, and throughput](#part-9--the-math-of-compute--vs-memory-bound-arithmetic-intensity-latency-and-throughput)
 - [Sources](#sources)
 
 ---
@@ -33,6 +34,7 @@ A few terms recur throughout. Read this once and refer back.
 | --- | --- |
 | **FLOP** | One floating-point operation (a multiply or an add). A matmul of shapes $M\times K$ by $K\times N$ costs about $2MNK$ FLOPs — one multiply and one add per inner-product term. |
 | **byte moved** | One byte read from or written to memory. We count these separately from FLOPs — they are the other, often dominant, cost. |
+| **(memory) bandwidth** | The *rate* at which data streams to/from memory, in **bytes per second** — the "width of the pipe." An H100's HBM runs at $\approx 3.35\times10^{12}$ byte/s $= 3.35$ TB/s. Do not confuse it with *latency* (the delay before the first byte arrives): bandwidth is throughput, how many bytes per second flow once the pipe is running. Time to move $N$ bytes $\approx N / \text{bandwidth}$, so this is the number that sets the cost of a memory-bound op. |
 | **GEMM** | *General Matrix–Matrix multiply*, $C = A B$ with $A$ of shape $M\times K$, $B$ of shape $K\times N$, $C$ of shape $M\times N$. The workhorse of deep learning. |
 | **GEMV** | Matrix–**vector** multiply (one of $M,N$ equals 1). |
 | **HBM** | *High-Bandwidth Memory* — the large, off-chip DRAM on a GPU board (tens of GB). Big but relatively slow to reach. |
@@ -369,6 +371,155 @@ Both are the same move we have seen all note long, now applied to inference: **t
 
 ---
 
+## Part 9 — The math of compute- vs memory-bound: arithmetic intensity, latency, and throughput
+
+Parts 2 and 8 told the story in words: big matmuls are compute-bound, inference decode is memory-bound. This part does the **arithmetic** that proves it. We will (a) rederive arithmetic intensity for a single matmul and pin down the exact batch size at which an H100 flips from memory- to compute-bound; (b) do the same accounting for the MLP and attention layers of a transformer, and see *why* prefill is compute-bound while generation is stuck below the line no matter what; and (c) turn that into concrete **latency** and **throughput** numbers, and the batch-size tradeoff that governs how LLMs are actually served. The whole part follows the Stanford CS336 lecture-10 accounting, rewritten in our notation.
+
+### 9.1 Setup and notation for this part
+
+A handful of inference-specific symbols, written with descriptive subscripts (matching Part 8's style). The last column gives the terse single letters the CS336 source uses, so you can cross-reference the lecture code if you want — but you never need to memorize those.
+
+| Symbol | Meaning | CS336 |
+| --- | --- | --- |
+| $n_\text{batch}$ | Batch size. In training/prefill, examples in the batch; in **generation, the number of concurrent requests** served together. | $B$ |
+| $n_\text{ctx}$ | Number of **context** tokens already present — the prompt during prefill, the cached history during generation (these are the key/value positions). | $S$ |
+| $n_\text{new}$ | Number of tokens processed **in this pass** (the query positions). Prefill sees the whole prompt at once ($n_\text{new}=n_\text{ctx}$); generation emits one token at a time ($n_\text{new}=1$). | $T$ |
+| $d_\text{model}$ | Model (hidden) dimension. | $D$ |
+| $d_\text{ff}$ | MLP inner (feed-forward) dimension, typically $\sim 3$–$4\times d_\text{model}$. | $F$ |
+| $n_\text{layers}$ | Number of transformer layers (same symbol as Part 8). | $L$ |
+| $n_\text{qheads}$ | Number of **query** heads. | $N$ |
+| $n_\text{kvheads}$ | Number of **key/value** heads (Part 8's $n_\text{heads}$ — under MQA/GQA, $n_\text{kvheads}<n_\text{qheads}$). | $K$ |
+| $d_\text{head}$ | Head dimension (same as Part 8). Model width $n_\text{qheads}\,d_\text{head}\approx d_\text{model}$. | $H$ |
+| $n_\text{vocab}$ | Vocabulary size. | $V$ |
+
+Everything is **bf16** at inference, so **2 bytes per element** — that stray factor of 2 in every byte count below is just this. As in Part 2, an operation is compute-bound when its AI exceeds the hardware's ops:byte ratio, and memory-bound when it falls short.
+
+### 9.2 Warm-up: the arithmetic intensity of one matrix multiply
+
+Take the workhorse of an MLP: multiply activations $X$ (shape $n_\text{batch}\times d_\text{model}$) by a weight $W$ (shape $d_\text{model}\times d_\text{ff}$). Account for every FLOP and every byte crossing HBM, exactly as Part 2 taught:
+
+- **Read $X$:** $2\,n_\text{batch}\,d_\text{model}$ bytes. **Read $W$:** $2\,d_\text{model}\,d_\text{ff}$ bytes. **Write** the result $Y$ ($n_\text{batch}\times d_\text{ff}$): $2\,n_\text{batch}\,d_\text{ff}$ bytes.
+- **Compute** $Y = XW$: $2\,n_\text{batch}\,d_\text{model}\,d_\text{ff}$ FLOPs (one multiply + one add per inner-product term).
+
+So the arithmetic intensity is
+
+$$
+\mathrm{AI} \;=\; \frac{2\,n_\text{batch}\,d_\text{model}\,d_\text{ff}}{2\,(n_\text{batch}\,d_\text{model} + d_\text{model}\,d_\text{ff} + n_\text{batch}\,d_\text{ff})} \;=\; \frac{n_\text{batch}\,d_\text{model}\,d_\text{ff}}{n_\text{batch}\,d_\text{model} + d_\text{model}\,d_\text{ff} + n_\text{batch}\,d_\text{ff}}.
+$$
+
+This is the same formula as Part 2's GEMM intensity, just named with our inference symbols. The important move is what happens **when $n_\text{batch}$ is much smaller than $d_\text{model}$ and $d_\text{ff}$** — precisely the inference regime, where the weight matrices are huge but you are pushing only a few tokens through them. Then the $d_\text{model}\,d_\text{ff}$ term dominates the denominator, the $d_\text{model}$ and $d_\text{ff}$ cancel against the numerator, and
+
+$$
+\mathrm{AI} \;\xrightarrow{\;n_\text{batch}\,\ll\, d_\text{model},\,d_\text{ff}\;}\; n_\text{batch}.
+$$
+
+The intensity of a skinny matmul is essentially **just its batch size**. Now compare against the hardware. For an H100, peak bf16 is $989\times10^{12}$ FLOP/s and HBM bandwidth is $3.35\times10^{12}$ byte/s, so its ops:byte ratio is
+
+$$
+\frac{989\times10^{12}\ \text{FLOP/s}}{3.35\times10^{12}\ \text{byte/s}} \;\approx\; 295\ \text{FLOP/byte}.
+$$
+
+**Why do we compare AI to this ratio — and what are the units?** First, the units, because they are the whole trick. Arithmetic intensity is $\mathrm{AI}=\dfrac{\text{FLOPs}}{\text{bytes}}$, so its units are **FLOP per byte**: how much math you do for each byte you fetch. The ops:byte ratio is $\dfrac{\text{peak FLOP/s}}{\text{peak byte/s}}$ — and the "per second" cancels top and bottom, leaving **FLOP per byte** as well. So the two numbers live in the *same units* and can be compared directly. AI (FLOP/byte) is a property of **your algorithm**; the ops:byte ratio (FLOP/byte) is a property of **the chip**.
+
+The comparison is really a race between two clocks. Any operation spends time on two things, which a GPU runs *in parallel*: doing the arithmetic, and moving the data. Their durations are
+
+$$
+t_\text{compute} = \frac{\text{FLOPs}}{\text{peak FLOP/s}}, \qquad
+t_\text{memory} = \frac{\text{bytes}}{\text{bandwidth}}.
+$$
+
+Because they overlap, the op finishes when the **slower** one finishes. It is **compute-bound** exactly when the compute clock is the slower one, $t_\text{compute} > t_\text{memory}$:
+
+$$
+\frac{\text{FLOPs}}{\text{peak FLOP/s}} \;>\; \frac{\text{bytes}}{\text{bandwidth}}
+\;\;\Longleftrightarrow\;\;
+\underbrace{\frac{\text{FLOPs}}{\text{bytes}}}_{\mathrm{AI}} \;>\; \underbrace{\frac{\text{peak FLOP/s}}{\text{bandwidth}}}_{\text{ops:byte}}.
+$$
+
+That rearrangement — multiply both sides by $\text{bandwidth}$ and divide by $\text{bytes}$ — is the *entire* reason we compare AI to the ops:byte ratio. If your work-per-byte beats the most work-per-byte the chip can sustain while the pipe is saturated, the arithmetic units are the bottleneck (compute-bound, good); if not, they sit idle waiting on HBM (memory-bound).
+
+Now the specific claim. For the H100 the break-even is $295$ FLOP/byte, and our skinny matmul has $\mathrm{AI}\approx n_\text{batch}$. Substituting into $\mathrm{AI} > \text{ops:byte}$ gives $n_\text{batch} > 295$ — **that is all "compute-bound only when $n_\text{batch}>295$" means**: you must push more than 295 tokens through the weight matrix before the math takes longer than fetching the weights. The extreme case is $n_\text{batch}=1$ — a matrix–**vector** product (exactly one token) — where $\mathrm{AI}=1$: you stream the entire $d_\text{model}\times d_\text{ff}$ weight matrix from HBM to do a mere $2\,d_\text{model}\,d_\text{ff}$ FLOPs, using the chip at well under 1% of peak. **That is the inference workload**: thin tensors, tiny intensity, hopelessly memory-bound. This is the roofline's GEMV example from Part 2, now with a number attached.
+
+### 9.3 The arithmetic intensity of a whole transformer layer
+
+Now the real thing. We split each layer into its MLP and its attention, and analyze both in the abstract $(n_\text{ctx}, n_\text{new})$ form, then specialize to **prefill** ($n_\text{new}=n_\text{ctx}$) and **generation** ($n_\text{new}=1$).
+
+**MLP layer.** A gated MLP (Part 8's width per token, with up/gate/down projections) reads the input $X$ ($n_\text{batch}\times n_\text{new}\times d_\text{model}$) and the three weight matrices, does three matmuls, and writes the intermediates and output:
+
+$$
+\text{FLOPs} = 6\,n_\text{batch}\,n_\text{new}\,d_\text{model}\,d_\text{ff}, \qquad
+\text{bytes} = \underbrace{4\,n_\text{batch}\,n_\text{new}\,d_\text{model}}_{\text{read }X,\text{ write }Y} + \underbrace{4\,n_\text{batch}\,n_\text{new}\,d_\text{ff}}_{\text{write }U,G} + \underbrace{6\,d_\text{model}\,d_\text{ff}}_{\text{read 3 weights}}.
+$$
+
+The FLOP count is three matmuls of $2\,n_\text{batch}\,n_\text{new}\,d_\text{model}\,d_\text{ff}$ each; the byte count is the activations in and out plus the weights read once. Taking the same limit as before — the number of *tokens in flight* $n_\text{batch}\,n_\text{new}$ is much smaller than $d_\text{model},d_\text{ff}$ — the weight term $6\,d_\text{model}\,d_\text{ff}$ dominates the bytes and
+
+$$
+\mathrm{AI}_\text{MLP} \;\xrightarrow{\;n_\text{batch}\,n_\text{new}\,\ll\,d_\text{model},\,d_\text{ff}\;}\; n_\text{batch}\,n_\text{new}.
+$$
+
+Just the matmul result again, with the batch enlarged to "tokens in flight" $n_\text{batch}\,n_\text{new}$. So the MLP is compute-bound whenever $n_\text{batch}\,n_\text{new}$ clears $\sim 295$: **easy in prefill** (the whole prompt makes $n_\text{new}$ large), and **workable in generation** ($n_\text{new}=1$) *provided you batch enough concurrent requests* to push $n_\text{batch}$ up.
+
+**Attention layer.** With FlashAttention (Part 6) the full score matrix (size $n_\text{new}\times n_\text{ctx}$) never touches HBM, so we only move $Q,K,V$ and the output. Reading $Q$ ($n_\text{batch}\times n_\text{new}\times d_\text{model}$), $K,V$ ($n_\text{batch}\times n_\text{ctx}\times d_\text{model}$ each), computing scores then the value-weighted sum, and writing the output:
+
+$$
+\text{FLOPs} = 4\,n_\text{batch}\,n_\text{ctx}\,n_\text{new}\,d_\text{model}, \qquad
+\text{bytes} = \underbrace{4\,n_\text{batch}\,n_\text{new}\,d_\text{model}}_{Q,\text{ output}} + \underbrace{4\,n_\text{batch}\,n_\text{ctx}\,d_\text{model}}_{K,\,V}.
+$$
+
+Here comes the crucial cancellation. Both FLOPs and bytes carry the **same** factor $n_\text{batch}\,d_\text{model}$, so it drops out entirely:
+
+$$
+\mathrm{AI}_\text{attn} \;=\; \frac{4\,n_\text{batch}\,n_\text{ctx}\,n_\text{new}\,d_\text{model}}{4\,n_\text{batch}\,d_\text{model}\,(n_\text{ctx}+n_\text{new})} \;=\; \frac{n_\text{ctx}\,n_\text{new}}{n_\text{ctx}+n_\text{new}}.
+$$
+
+**The attention intensity does not depend on $n_\text{batch}$ at all.** Specializing:
+
+- **Prefill** ($n_\text{new}=n_\text{ctx}$): $\mathrm{AI} = \dfrac{n_\text{ctx}^2}{2\,n_\text{ctx}} = \dfrac{n_\text{ctx}}{2}$. Long prompts give high intensity — compute-bound and healthy. (Notice the batch dimension is *absent*; long sequences, not big batches, are what save prefill attention.)
+- **Generation** ($n_\text{new}=1$): $\mathrm{AI} = \dfrac{n_\text{ctx}}{n_\text{ctx}+1} < 1$. Below the line for *any* context length, and — since $n_\text{batch}$ cancels — **no amount of batching can lift it.** This is the fundamental bottleneck of transformer inference.
+
+Why does batching rescue the MLP but not attention? Because of *what is shared*. In the MLP, **every sequence hits the same weights**: the $6\,d_\text{model}\,d_\text{ff}$ bytes of weights are read once and amortized over all $n_\text{batch}$ sequences, so a bigger $n_\text{batch}$ buys more FLOPs per weight-byte loaded — intensity climbs. In attention, **every sequence carries its own KV cache** (Part 8): the $K,V$ bytes scale with $n_\text{batch}$ in lockstep with the FLOPs, so there is nothing to amortize and $n_\text{batch}$ cancels. Serving more sequences just means doing more independent, low-intensity matrix–vector products side by side.
+
+### 9.4 From intensity to latency and throughput
+
+Because generation is memory-bound, its speed is set purely by **how many bytes must be streamed from HBM per token** — the actual arithmetic hides under the memory time. So we can estimate real performance just by counting bytes. Two quantities matter, both per model:
+
+$$
+\text{parameters}: \;\; P = \underbrace{2\,n_\text{vocab}\,d_\text{model}}_{\text{embed + unembed}} + \underbrace{3\,d_\text{model}\,d_\text{ff}\,n_\text{layers}}_{\text{MLP up/gate/down}} + \underbrace{(2\,d_\text{model}\,n_\text{qheads}\,d_\text{head} + 2\,d_\text{model}\,n_\text{kvheads}\,d_\text{head})\,n_\text{layers}}_{\substack{\text{attn: }Q\text{ \& output proj}\\ +\;K\text{ \& }V\text{ proj}}}
+$$
+
+Each term is a matrix's element count: the two embedding tables ($n_\text{vocab}\times d_\text{model}$), three MLP matrices ($d_\text{model}\times d_\text{ff}$) per layer, and per layer the query+output projections ($d_\text{model}\times n_\text{qheads}d_\text{head}$ each) plus the key+value projections ($d_\text{model}\times n_\text{kvheads}d_\text{head}$ each, smaller under GQA). The **memory footprint** in bytes is the parameters (bf16) plus one KV cache per concurrent sequence:
+
+$$
+M(n_\text{batch}) \;=\; \underbrace{2P}_{\text{weights}} \;+\; n_\text{batch}\cdot\underbrace{2\cdot 2\cdot n_\text{ctx}\, n_\text{kvheads}\, d_\text{head}\, n_\text{layers}}_{\text{KV cache per sequence}},
+$$
+
+where the KV-cache term is Part 8's formula: a factor $2$ for storing both $K$ and $V$, another $2$ for bytes/element, times $n_\text{ctx}$ tokens $\times\,(n_\text{kvheads}d_\text{head})$ width $\times\,n_\text{layers}$ layers. Since each generated token must read essentially this whole footprint once from HBM,
+
+$$
+\text{latency} \;=\; \frac{M(n_\text{batch})}{\text{memory bandwidth}} \quad(\text{seconds per token}),
+\qquad
+\text{throughput} \;=\; \frac{n_\text{batch}}{\text{latency}} \quad(\text{tokens per second}),
+$$
+
+the throughput being $n_\text{batch}$ because the $n_\text{batch}$ sequences each emit one token per latency period.
+
+**The batch-size tradeoff.** Watch what $n_\text{batch}$ does to the two terms of $M(n_\text{batch})$. The weight term $2P$ is **fixed**; the KV term grows **linearly in $n_\text{batch}$**. So:
+
+- **Larger $n_\text{batch}$ → worse latency**, because each token must now stream a bigger ($O(n_\text{batch})$) pile of KV cache.
+- **Larger $n_\text{batch}$ → better throughput**, because the fixed cost of reading the weights $2P$ is amortized over more sequences — until the KV term dominates and gains flatten.
+
+![Twin-axis line plot for Llama-2-13B on one H100 (context length 1024, bf16). The x-axis is the batch size (number of concurrent requests) on a log scale from 1 to 256. A rising blue curve (left axis) shows latency per token in milliseconds climbing from about 8 ms at batch 1 to tens of ms at large batch; a rising green curve (right axis) shows throughput in tokens/second climbing steeply at first then flattening. A vertical dashed line near batch 64 marks where total memory reaches the 80 GB HBM capacity; the region to its right is shaded red and labeled "exceeds 80 GB — does not fit". Markers annotate batch 1, 64, 256 with their (latency, throughput) values.](./assets/latency_throughput_batch.jpg){ width=90% }
+*Increasing the batch size trades latency for throughput, and eventually runs out of HBM. Weights ($\approx$ 26 GB in bf16) are a fixed cost amortized over the batch; the KV cache grows linearly with $n_\text{batch}$ and dominates once the batch is large — pushing past the 80 GB card and giving diminishing throughput. (Recreated in our notation from the CS336 lecture-10 example; numbers are approximate.)*
+
+Concretely, for a Llama-2-13B-class model ($\approx$ 13B params $\Rightarrow$ $\approx$ 26 GB of bf16 weights) on an 80 GB H100 with a 1K-token context: $n_\text{batch}=1$ gives the best latency ($\sim$8 ms/token) but poor throughput; raising to $n_\text{batch}=64$ multiplies throughput by more than $20\times$ at the cost of $\sim3\times$ latency; and $n_\text{batch}=256$ blows past the 80 GB card entirely, so it does not even fit — and by then throughput gains are already flattening. This is why serving systems pick a batch size deliberately: **small batches for latency-sensitive interactive use, large batches for throughput-sensitive bulk use.** Two more practical corollaries fall straight out:
+
+- **Cheap parallelism vs. hard parallelism.** Launch $M$ independent *copies* of the model on $M$ devices and throughput scales by $M$ with latency unchanged — trivial but $M\times$ the hardware. To go bigger than one device *per copy* you must **shard** the weights and KV cache across devices (tensor/pipeline parallelism, Part 5's NVLink territory), which is the harder engineering.
+- **Time-to-first-token (TTFT) is essentially prefill time.** Prefill is the compute-bound phase (9.3), so TTFT is governed by it — favor **smaller** batches during prefill for snappy first tokens, then **larger** batches during generation to maximize sustained throughput. This asymmetry is why prefill and decode are often scheduled and even served separately.
+
+The whole part is one number chased through the stack: the arithmetic intensity of a thin matmul is just its batch, attention's generation intensity is stuck below 1 because $n_\text{batch}$ cancels, and so inference latency is set by the bytes you must stream — leaving batch size as the one knob that trades latency for throughput until the KV cache eats your HBM. It is Part 2's roofline, all the way down to the serving bill.
+
+---
+
 ## Sources
 
 - **NVIDIA — Matrix Multiplication Background User's Guide.** The definitive explanation of tiling, tile/wave quantization, Tensor Core alignment, and arithmetic intensity for GEMMs. <https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/>
@@ -382,5 +533,8 @@ Both are the same move we have seen all note long, now applied to inference: **t
 - **Spheron — "OpenAI Triton Kernel Development on GPU Cloud" (2026 guide).** Practical Triton programming model, autotuning, TMA on Hopper/Blackwell, and the H100 fused-softmax bandwidth numbers. <https://www.spheron.network/blog/openai-triton-kernel-gpu-cloud-2026/>
 - **HuggingFace — "KV Cache from Scratch in nanoVLM."** Why the cache exists, prefill vs decode, and a from-scratch PyTorch implementation with the generation loop. <https://huggingface.co/blog/kv-cache>
 - **HuggingFace — "The KV Cache: How It Eliminates Redundancy" (atharv6f).** Concise conceptual take on what gets cached, why only K/V, and the memory-vs-compute tradeoff. <https://huggingface.co/blog/atharv6f/kv-cache-basics>
+
+- **Stanford CS336, "Language Modeling from Scratch" — Lecture 10 (systems / inference).** The FLOP-and-byte accounting for a matmul, the MLP and attention layers, and the transformer performance stats (parameters, memory, latency, throughput) that Part 9 follows. <https://github.com/stanford-cs336/lectures/blob/main/lecture_10.py>
+- **"How to Scale Your Model" (JAX ML scaling book) — Inference.** The naive-vs-cached inference picture and the prefill/generation, latency/throughput framing underlying Part 9. <https://jax-ml.github.io/scaling-book/inference/>
 
 **Companion notes in this repo:** [`absmax-mse-vs-softmax-ce.md`](./absmax-mse-vs-softmax-ce.md) for softmax mechanics (needed in Part 6) and [`lora.md`](./lora.md) for the "a linear layer is a matrix multiply" picture.
