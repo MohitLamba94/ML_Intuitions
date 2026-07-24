@@ -169,6 +169,29 @@ This repository contains personal notes and learning material. The goal is to bu
   - [The modern landscape](mixture-of-experts.md#the-modern-landscape)
   - [Sources](mixture-of-experts.md#sources)
 
+- **[Contrastive Losses: From Siamese Pairs to CLIP, SigLIP, and Negative-Free Twins](ContrastiveLosses.md)**
+  - [The shared setup: twin towers and a similarity space](ContrastiveLosses.md#the-shared-setup-twin-towers-and-a-similarity-space)
+  - [Setup and notation](ContrastiveLosses.md#setup-and-notation)
+  - [Two ways to frame the objective](ContrastiveLosses.md#two-ways-to-frame-the-objective)
+  - [Margin-based losses: the metric-learning lineage](ContrastiveLosses.md#margin-based-losses-the-metric-learning-lineage)
+    - [Pairwise contrastive loss (Hadsell, Chopra, LeCun, 2006)](ContrastiveLosses.md#pairwise-contrastive-loss-hadsell-chopra-lecun-2006)
+    - [Triplet loss (FaceNet, 2015)](ContrastiveLosses.md#triplet-loss-facenet-2015)
+    - [Using many negatives: N-pair, lifted-structured, multi-similarity](ContrastiveLosses.md#using-many-negatives-n-pair-lifted-structured-multi-similarity)
+  - [The InfoNCE family: contrastive learning as classification](ContrastiveLosses.md#the-infonce-family-contrastive-learning-as-classification)
+    - [InfoNCE and CPC (van den Oord et al., 2018)](ContrastiveLosses.md#infonce-and-cpc-van-den-oord-et-al-2018)
+    - [NT-Xent and SimCLR (Chen et al., 2020)](ContrastiveLosses.md#nt-xent-and-simclr-chen-et-al-2020)
+    - [MoCo: a momentum encoder and a queue (He et al., 2020)](ContrastiveLosses.md#moco-a-momentum-encoder-and-a-queue-he-et-al-2020)
+    - [Supervised contrastive loss (Khosla et al., 2020)](ContrastiveLosses.md#supervised-contrastive-loss-khosla-et-al-2020)
+    - [Decoupled contrastive learning (Yeh et al., 2022)](ContrastiveLosses.md#decoupled-contrastive-learning-yeh-et-al-2022)
+  - [Multimodal contrastive learning: CLIP and SigLIP](ContrastiveLosses.md#multimodal-contrastive-learning-clip-and-siglip)
+    - [CLIP: symmetric InfoNCE across two modalities (Radford et al., 2021)](ContrastiveLosses.md#clip-symmetric-infonce-across-two-modalities-radford-et-al-2021)
+    - [SigLIP: a sigmoid loss that drops global normalization (Zhai et al., 2023)](ContrastiveLosses.md#siglip-a-sigmoid-loss-that-drops-global-normalization-zhai-et-al-2023)
+  - [Contrastive learning for text embeddings](ContrastiveLosses.md#contrastive-learning-for-text-embeddings)
+  - [Negative-free twin towers: avoiding collapse without negatives](ContrastiveLosses.md#negative-free-twin-towers-avoiding-collapse-without-negatives)
+  - [Why does contrastive learning work? Alignment and uniformity](ContrastiveLosses.md#why-does-contrastive-learning-work-alignment-and-uniformity)
+  - [Choosing a loss: a practical map](ContrastiveLosses.md#choosing-a-loss-a-practical-map)
+  - [Sources](ContrastiveLosses.md#sources)
+
 ### training_llms/ — Training LLMs from Scratch
 
 - **[The Tokenizer: Turning Text into Integers an LLM Can Read](training_llms/001_tokeniser.md)**
