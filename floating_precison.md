@@ -37,7 +37,7 @@ These terms recur throughout; skim once and refer back.
 | **sign** $S$ | 1 bit: $S=0$ positive, $S=1$ negative. |
 | **exponent** $E$ | the bits that set the *scale* (which power of two you are near). More exponent bits ⇒ wider **dynamic range**. |
 | **mantissa** $M$ (a.k.a. fraction / significand) | the bits that set the *precision* within that scale — how finely you can subdivide between two powers of two. |
-| **bias** $b$ | a constant subtracted from the stored exponent so it can represent negative powers; $b = 2^{(\#\text{exp bits})-1}-1$. |
+| **bias** $b$ | a constant subtracted from the stored exponent so it can represent negative powers; $b = 2^{\,k-1}-1$ where $k$ is the number of exponent bits. |
 | **"ExMy"** | naming convention: a format with $x$ exponent bits and $y$ mantissa bits (plus 1 sign bit). E.g. **E4M3** = 4 exponent, 3 mantissa. |
 | **dynamic range** | ratio of the largest to smallest magnitude the format can represent — governed almost entirely by exponent bits. |
 | **precision** | how many distinct values sit between consecutive powers of two — governed by mantissa bits ($2^{M}$ steps). |
