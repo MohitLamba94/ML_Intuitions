@@ -132,6 +132,7 @@ This repository contains personal notes and learning material. The goal is to bu
 
 - **[Why Hardware Makes Matrix Multiply Fast — GPUs, TPUs, and FlashAttention](gpu-tpu-matmul-flashattention.md)**
   - [Setup and Notation](gpu-tpu-matmul-flashattention.md#setup-and-notation)
+  - [The Memory Hierarchy: HBM vs SRAM (precursor)](gpu-tpu-matmul-flashattention.md#the-memory-hierarchy-hbm-vs-sram-precursor)
   - [Part 1 — Why the *shape* of a matrix changes its speed (128 vs 125)](gpu-tpu-matmul-flashattention.md#part-1--why-the-shape-of-a-matrix-changes-its-speed-128-vs-125)
   - [Part 2 — The roofline: memory-bound vs math-bound](gpu-tpu-matmul-flashattention.md#part-2--the-roofline-memory-bound-vs-math-bound)
   - [Part 3 — GPU vs CPU: the fundamental difference](gpu-tpu-matmul-flashattention.md#part-3--gpu-vs-cpu-the-fundamental-difference)

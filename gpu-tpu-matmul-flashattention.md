@@ -13,6 +13,7 @@ We assume you are comfortable with what a matrix multiply *is* and with undergra
 ## Table of Contents
 
 - [Setup and Notation](#setup-and-notation)
+- [The Memory Hierarchy: HBM vs SRAM (precursor)](#the-memory-hierarchy-hbm-vs-sram-precursor)
 - [Part 1 — Why the *shape* of a matrix changes its speed (128 vs 125)](#part-1--why-the-shape-of-a-matrix-changes-its-speed-128-vs-125)
 - [Part 2 — The roofline: memory-bound vs math-bound](#part-2--the-roofline-memory-bound-vs-math-bound)
 - [Part 3 — GPU vs CPU: the fundamental difference](#part-3--gpu-vs-cpu-the-fundamental-difference)
@@ -50,6 +51,38 @@ The two costs — FLOPs and bytes moved — race each other. Whichever takes lon
 
 ---
 
+## The Memory Hierarchy: HBM vs SRAM (precursor)
+
+Almost every argument in this note turns on one physical fact: **not all memory on a GPU is equally close to the compute units.** Before Part 1 can talk about "moving less data," you need a feel for *what* the data is being moved between. There are two levels that matter.
+
+**HBM — the big, far-away memory.** *High-Bandwidth Memory* is the DRAM that sits on the GPU board, physically **off** the compute die (stacked in chips next to the GPU and connected by a wide bus). It is where your model weights, activations, and the input/output matrices actually live. Two things characterize it:
+
+- **Large:** tens of gigabytes (an A100 has 40–80 GB, an H100 up to 80 GB). This is "GPU memory" in the everyday sense — when you get a CUDA out-of-memory error, this is what filled up.
+- **Comparatively slow to reach:** even at $\approx 2$–$3.35$ TB/s of *bandwidth*, it is off-chip, so every access travels across the board and back. All the SMs share this one pool, and reaching it costs both time (latency) and precious bandwidth.
+
+*Wait — if SRAM is ~10× faster, why is HBM called "**high**-bandwidth" at all?* Because the name is relative to **other off-chip main memory, not to on-chip SRAM.** HBM is competing in the weight class of "large memory that can actually hold your model," and there it is a champion: ordinary CPU DRAM (DDR5) does ~50–100 GB/s and older graphics DRAM (GDDR6) ~500–1000 GB/s, so HBM's ~2–3.35 TB/s is ~5–30× faster than the DRAM it replaced. It earns that by **packaging**: instead of a few chips scattered on the board behind a narrow bus, HBM *stacks* DRAM dies vertically and wires them to the GPU over an extremely **wide** bus (thousands of lanes) on the same package — width × a moderate clock = huge aggregate bandwidth. But it is still DRAM sitting off the compute die, so it plays in a different league from SRAM, which is a faster *technology* (transistor cells right next to the cores). Nobody markets SRAM as "high-bandwidth memory" because it is understood to be the fast on-chip tier; "HBM" is simply the product name for the best *main* memory you can attach. So both facts hold at once: HBM is high-bandwidth **among memories big enough to store your model**, and still ~10× slower than the tiny on-chip SRAM — which is exactly why the hierarchy exists.
+
+**SRAM — the tiny, on-chip scratchpad.** *Static RAM* is built directly into each SM out of fast transistor cells (this is the registers, plus the "shared memory" / L1 cache). Its character is the mirror image of HBM:
+
+- **Tiny:** kilobytes to a few megabytes *per SM* — you cannot hold a whole matrix here, only a small tile of it.
+- **Very fast, and right next to the arithmetic units:** roughly an **order of magnitude higher bandwidth** than HBM and far lower latency, because the bits never leave the chip. Each SM's SRAM is private to that SM.
+
+**Why the split exists at all.** It is the classic capacity-vs-speed trade-off of memory technology. SRAM cells are fast but bulky (several transistors per bit) and power-hungry, so you can only afford a little, and it must sit on the compute die where space is scarce. DRAM (what HBM is made of) packs one transistor plus a capacitor per bit — far denser and cheaper, so you get tens of GB, but it is slower and must live off-die. You cannot have both "huge" and "fast and on-chip" at once, so hardware gives you a *hierarchy*: a vast slow pool (HBM) backing a tiny fast one (SRAM).
+
+**The analogy that makes it stick.** Think of HBM as a **warehouse across the parking lot** and SRAM as the **small workbench** in front of you. The workbench holds only a few parts at a time, but you can grab from it instantly. Fetching from the warehouse means a slow round-trip. The entire performance game — tiling in Part 1, FlashAttention in Part 6 — is the same move: **haul a batch of parts from the warehouse to the bench once, do as much work as you can with them before they go back, and avoid repeat trips.** Every "move less data" statement in this note means specifically *make fewer trips to HBM*.
+
+| | **HBM** (off-chip DRAM) | **SRAM** (on-chip) |
+| --- | --- | --- |
+| Size | tens of GB | KB–few MB per SM |
+| Bandwidth | high (~2–3.35 TB/s) but shared | ~10× higher |
+| Latency | high (off-die round trip) | low (right next to the cores) |
+| Holds | whole tensors, weights, activations | one tile / working set |
+| Analogy | warehouse across the lot | workbench in front of you |
+
+Keep this two-level picture in mind: from here on, "the slow bus" or "a trip to memory" means HBM, and "on-chip" or "fast memory" means SRAM.
+
+---
+
 ## Part 1 — Why the *shape* of a matrix changes its speed (128 vs 125)
 
 ### 1.1 Tiling: the reason shape matters at all
@@ -58,7 +91,11 @@ A GPU does not compute the output matrix $C$ in one monolithic operation. It **c
 
 Why bother tiling instead of streaming the whole thing? **Data reuse** — and to see why it matters we have to count *bytes moved*, not just FLOPs. A matmul is unusually rich in reuse: in $C = AB$, each element of $A$ is used in $N$ different output elements (once for every column of $B$), and each element of $B$ is used in $M$ of them (once for every row of $A$). The whole performance question is whether you *exploit* that reuse or throw it away. Consider the two extremes.
 
-**The naive extreme: no reuse.** Suppose you compute each output element $C_{ij}=\sum_k A_{ik}B_{kj}$ independently, pulling its operands straight from HBM every time. Each output element then costs $2K$ reads (a length-$K$ row of $A$ and a length-$K$ column of $B$), so across all $MN$ outputs you read about $2MNK$ elements from HBM while doing about $2MNK$ FLOPs. That is roughly **one FLOP per element moved — arithmetic intensity ≈ 1.** From Part 2, an intensity of 1 sits far to the *left* of the roofline ridge (which is ~40–140): the operation is hopelessly **memory-starved**, and the Tensor Cores spend almost all their time waiting on HBM. The same row of $A$ gets dragged across the slow bus $N$ separate times; the same column of $B$, $M$ times. Enormous, redundant traffic.
+**The naive extreme: no reuse.** Suppose you compute each output element $C_{ij}=\sum_k A_{ik}B_{kj}$ independently, pulling its operands straight from HBM every time. Each output element then costs $2K$ reads (a length-$K$ row of $A$ and a length-$K$ column of $B$), so across all $MN$ outputs you read about $2MNK$ elements from HBM while doing about $2MNK$ FLOPs. That is roughly **one FLOP per element moved — arithmetic intensity ≈ 1.**
+
+To see why that ratio is a disaster, picture two clocks running in parallel: one for the arithmetic units and one for the HBM bus that feeds them. The Tensor Cores can perform *hundreds* of FLOPs in the time the bus delivers a single element from HBM — recall from the precursor that HBM is far slower to reach than on-chip memory, and the cores are faster still. At intensity ≈ 1 there is exactly **one FLOP of work waiting for each element that crawls in over the slow bus.** So the cores blast through that one FLOP almost instantly and then sit idle — *starving* — while the bus struggles to drag in the next operand. The chip's expensive arithmetic capacity goes almost entirely unused; runtime is set purely by how fast HBM can move bytes. That is what **memory-starved** (equivalently, *memory-bound*) means: the bottleneck is the pipe feeding the cores, not the cores themselves.
+
+And the traffic here is not just large, it is *redundant*: the same row of $A$ gets dragged across the slow bus $N$ separate times (once per output column it contributes to), and the same column of $B$, $M$ times. We pay the full HBM cost over and over for values we already had. (Part 2 formalizes this "which clock wins" picture as the *roofline*; here we only need the intuition that intensity ≈ 1 is deep in the starved regime.)
 
 **The tiled extreme: load once, reuse many times.** Now instead assign one $T\times T$ tile of $C$ to a thread block. It loads the corresponding $T\times K$ block of $A$ and $K\times T$ block of $B$ into on-chip SRAM/registers **once** — about $2TK$ reads from HBM — and then performs all $T^2K$ multiply-adds for that tile reading its operands from fast SRAM, not HBM. Every value that was loaded is now **reused about $T$ times** before it is discarded. HBM traffic for the tile drops from the naive $\sim 2T^2K$ down to $\sim 2TK$: a factor of $T$ fewer trips to slow memory. Equivalently, the arithmetic intensity climbs from $\approx 1$ to $\approx T$.
 
@@ -108,6 +145,25 @@ Now the folklore is just arithmetic. Padding $125 \to 128$ does three good thing
 
 The counterintuitive punchline is that the $128\times128$ matmul can be genuinely *faster in wall-clock time* than $125\times125$ **even though it does more arithmetic** — because it wastes nothing at any of the three granularities, while the "smaller" matrix quietly pays for full tiles, a ragged tail wave, and misaligned Tensor Core lanes. Powers of two (and multiples of 8/16/128) are not magic; they are simply the numbers that divide evenly at every level of the hardware's fixed block structure.
 
+### 1.6 A map of the chip: where HBM, SRAM, and Tensor Cores actually live
+
+We have now used several hardware words — HBM, SRAM, SM, Tensor Core — and it is easy to picture them as a flat list of peers. They are not. They sit in a strict **containment hierarchy**, like boxes inside boxes, and getting that picture right removes most of the confusion (for instance: *no, a Tensor Core is not "part of" SRAM* — they are siblings, one a compute unit and one a storage unit, both living inside the same SM). Read the map from the outside in.
+
+![Nested-box diagram of a GPU. Outermost box: the GPU board/package. Inside it, on the left, tall red bars labeled HBM (DRAM) — off-chip, tens of GB, ~2-3 TB/s, big and slow. On the right, a large blue box: the GPU die (the processor chip). Inside the die: a wide L2 cache band shared by all SMs, and a row of ~100+ small boxes labeled SM. One SM is zoomed in to show its four internal parts: a yellow "Warp scheduler + instruction decoder (control)" box, a green "Registers + SRAM (shared memory / L1) — tiny, fast, on-chip storage" box, a blue "CUDA cores (arithmetic lanes)" grid of many small squares, and a pink "Tensor Cores" box of a few larger units that each do a small matrix multiply. Arrows show data flowing HBM to L2 to the SM's SRAM and then into the CUDA cores and Tensor Cores.](./assets/gpu_chip_map.jpg){ width=100% }
+*Where everything lives. HBM sits off the processor die; the die holds a shared L2 and ~100+ SMs; each SM contains its own storage (registers + SRAM) alongside its compute units (CUDA cores and Tensor Cores). Tensor Cores and SRAM are peers inside an SM — one computes, one stores. (Schematic, recreated in our notation from the NVIDIA GPU-architecture literature.)*
+
+Walking outside-in:
+
+- **The GPU board (package)** is the whole card you plug in. It holds two very different things: the processor die and the HBM chips.
+- **HBM** lives **off the processor die** — separate memory chips on the board. This is why it is the "far" memory: physically it is not even on the same piece of silicon as the compute. It is big (tens of GB) and, as we saw, comparatively slow to reach.
+- **The GPU die** is the actual processor chip. On it sit a shared **L2 cache** (a mid-level buffer all compute units share) and **~100+ SMs**.
+- **An SM (Streaming Multiprocessor)** is one self-contained mini-processor — think of it as one "worker station." A GPU has roughly a hundred of them running in parallel. Crucially, *inside each SM* live **both** storage and compute, side by side:
+  - **Storage:** the SM's **registers + SRAM** (the "shared memory" / L1) — the tiny, fast, on-chip scratchpad from the precursor. This is where a tile lands after being hauled up from HBM.
+  - **Compute:** the **CUDA cores** (many simple arithmetic lanes, for ordinary scalar/vector math) and the **Tensor Cores** (a handful of specialized units that each swallow a small matrix multiply in one shot).
+  - **Control:** a **warp scheduler + instruction decoder** that decides what the lanes do each cycle (Part 3 explains these).
+
+So the answer to "is a Tensor Core part of SRAM?" is a clean **no**: within one SM, SRAM is the *filing cabinet* and the Tensor Core is a *worker at the desk*. Data flows **HBM → L2 → the SM's SRAM/registers → into the CUDA/Tensor cores**, and the results flow back down. Every optimization in this note — tiling here, FlashAttention in Part 6 — is about keeping the working data as far up that chain (as close to the cores) as possible, so the cores are fed from fast SRAM instead of waiting on far-off HBM. Part 3 zooms into *how* one SM keeps its lanes busy; this map is the backdrop for it.
+
 ---
 
 ## Part 2 — The roofline: memory-bound vs math-bound
@@ -115,6 +171,8 @@ The counterintuitive punchline is that the $128\times128$ matmul can be genuinel
 Part 1 was about *waste* at fixed granularities. Part 2 is the deeper question: even with a perfectly shaped matmul, what actually limits you — the arithmetic units, or the pipe feeding them data?
 
 ### 2.1 Arithmetic intensity vs the hardware's ops:byte ratio
+
+One new word first: a **kernel** is simply *a function that runs on the GPU* — the actual piece of code that carries out one operation (a matmul, a softmax, an activation) across all those threads and SMs. When you call a matrix multiply, the GPU runs a matmul kernel; a softmax is another kernel; and so on. So "kernel" is a property of the *software* (the operation you launched), while HBM, SM, and the lanes are the *hardware* it runs on. (Part 7 goes deeper into what a kernel is and how several small ones get *fused* into one.) For now: each kernel you launch does some FLOPs and moves some bytes, and that ratio is what we analyze.
 
 Every kernel has an **arithmetic intensity**: FLOPs done per byte moved to/from HBM. Every GPU has an **ops:byte ratio**: its peak FLOP/s divided by its peak byte/s. The comparison is the whole story:
 
@@ -131,19 +189,44 @@ $$
 \text{AI} \;=\; \frac{2MNK}{2\,(MK + NK + MN)} \;=\; \frac{MNK}{MK + NK + MN},
 $$
 
-where the numerator $2MNK$ is the FLOP count and the denominator counts the bytes of the two inputs read plus the output written (times the bytes per element, which cancels into the constant). The key feature: intensity **grows with the matrix size**. Big square matmuls reuse each loaded byte many times; skinny ones barely reuse anything.
+where the numerator $2MNK$ is the FLOP count and the denominator counts the bytes of the two inputs read ($MK$ elements of $A$, $NK$ of $B$) plus the output written ($MN$ elements of $C$), times the bytes per element (which cancels into the constant, so we can ignore it).
+
+**The subtlety about the denominator (and why it needs tiling).** This formula counts each input element as read from HBM **exactly once** — the *minimum possible* traffic. A natural objection: *why can't I hit that trivially? Just read each value once, leave it in SRAM, and never re-read it.* That would be perfect — **if SRAM were big enough to hold everything you still need.** It isn't. SRAM is kilobytes to a few megabytes; the matrices are hundreds of megabytes. So you are constantly forced to **evict** values to make room, and if you evict something before its last use, you must fetch it from HBM all over again. The whole issue is *capacity*.
+
+See how the naive order falls into exactly this trap. Compute $C$ element by element: for each output row $i$, sweep every column $j$, each a length-$K$ dot product. The catch is that producing *one* output row touches **all** of $B$ ($K\times N$ elements). To read $B$ only once you would have to keep the entire $B$ resident — it does not fit — so $B$ is streamed from HBM afresh for every one of the $M$ rows. Traffic balloons to $\approx MNK$: the memory-starved extreme, nowhere near the read-once floor. "Just keep it in SRAM" silently assumed unbounded SRAM.
+
+**Tiling is the fix, and this is *why* it exists.** With a real, tiny SRAM, the *order* in which you traverse the multiply decides whether the working set fits. Tiling reorders the work so each value's reuses are **clustered close together in time**: a block computes one $T\times T$ output tile, holding only a $T\times K$ strip of $A$ and a $K\times T$ strip of $B$ at a time (walking $K$ in chunks, accumulating), and every value it loads is reused across the whole tile *before* it is evicted. So tiling is not about whether reuse is possible in principle — it is the traversal that keeps the working set small enough to fit on-chip, which is what lets you approach "read once" with a finite SRAM. Without it the working set is the whole matrix; with it, one tile.
+
+One honest caveat on magnitudes: single-level tiling actually reaches a reuse of roughly the **tile size** $T$ (HBM traffic $\approx 2MNK/T$, intensity $\approx T$ — the $\approx 128$ figure from Part 1), *not* the full $M{=}N{=}K$ ideal. Squeezing all the way down to the formula's floor takes extra help — the L2 cache holding a whole panel, plus multi-level blocking — which very large matmuls exploit. So read the formula as the theoretical **best case**: a *lower bound* on traffic, hence an *upper bound* on achievable intensity. A poorly tiled kernel lands below it and is more memory-bound than it suggests. The key feature of that best case: intensity **grows with matrix size**. Big square matmuls reuse each loaded byte many times; skinny ones barely reuse anything.
 
 ### 2.2 The roofline picture and two worked examples
 
-Plot attainable throughput against arithmetic intensity and you get the famous **roofline**: a sloped line (you are on the memory "roof," throughput = bandwidth × intensity) that rises until it hits a flat ceiling (peak compute). The corner where they meet is the **ridge point**.
+The inequality in §2.1 is a yes/no test. The **roofline** is just that same test drawn as a picture, so you can *see* how far into memory- or compute-bound territory a kernel sits. Let us build the plot from scratch, because the axes are the whole point.
+
+**The axes.** The horizontal axis is **arithmetic intensity** (FLOPs per byte moved) — a property of *your kernel*. The vertical axis is **attainable throughput**: the actual speed you can hope to reach, in FLOP/s. Note this is *not* the ratio from §2.1 — the ratio is a single fixed number for the hardware; here we are plotting, for every possible kernel intensity along the x-axis, how fast that kernel could run.
+
+**Where the two "roofs" come from.** Your achievable speed is capped by two independent limits, and whichever is lower wins:
+
+1. **The memory limit (the slanted roof).** Suppose the memory pipe is the bottleneck. The hardware moves bytes at a fixed rate — its **bandwidth** $B$ (bytes/s). Each byte you move carries $\text{AI}$ FLOPs worth of work with it. So the fastest you can compute is
+$$\text{throughput} \le B \times \text{AI} \quad (\text{bytes/s} \times \text{FLOPs/byte} = \text{FLOPs/s}).$$
+   This is a straight line through the origin with slope $B$: double the intensity, double the attainable speed. (On the log-log axes of the figure it appears as a rising line of slope 1.) The higher your intensity, the more compute each delivered byte buys you.
+2. **The compute limit (the flat roof).** No matter how high the intensity, you can never exceed the chip's **peak FLOP/s** — the arithmetic units have a top speed. That is a flat horizontal ceiling.
+
+Your attainable throughput is the **minimum** of the two: $\text{throughput} = \min(\text{peak FLOP/s},\; B \times \text{AI})$. Plot that and you get the "roofline" shape — a rising slanted line that bends into a flat ceiling.
+
+**The ridge point is where the inequality flips.** The corner where the slanted line meets the flat ceiling happens when $B \times \text{AI} = \text{peak FLOP/s}$, i.e. at
+$$\text{AI}_\text{ridge} = \frac{\text{peak FLOP/s}}{B} = \text{the hardware's ops:byte ratio}.$$
+So the ridge's x-coordinate is *exactly* the right-hand side of the §2.1 inequality. That is the bridge between the formula and the picture: **your kernel is a point on the x-axis, and the question "is AI greater than the ops:byte ratio?" is just "is my point to the right of the ridge?"** Left of the ridge, the slanted memory roof is the lower cap — you are **memory-bound** (bandwidth limits you). Right of it, the flat compute roof is the lower cap — you are **math-bound** (FLOPs limit you). The y-axis never needed to show the ratio; the ratio is *where the two roofs cross*.
 
 ![Roofline plot on log-log axes. A sloped line rises from the bottom-left (the memory-bandwidth limit) until it meets a flat horizontal ceiling at 125 TFLOP/s (the compute limit); the corner is the ridge point at 139 FLOP/byte. The region left of the ridge is shaded and labeled memory-bound; right of it, math-bound. Three example points are marked: a GEMV/activation at arithmetic intensity under 1 (deep in memory-bound), a skinny GEMM at intensity ~124 (just short of the ridge, still memory-bound), and a large square GEMM at intensity ~2730 (well into math-bound, sitting on the compute ceiling).](./assets/roofline_memory_vs_math.jpg){ width=78% }
 *The roofline. Left of the ridge you are starved for data; right of it you are limited by raw compute. (Recreated in our notation with V100-class numbers — 125 TFLOP/s peak, 0.9 TB/s HBM, ridge ≈ 139 FLOP/byte; the two GEMM examples and the framing are from the NVIDIA guides.)*
 
+A quick note on the notation, since three numbers for a "matrix multiply" can look odd. A GEMM is written by its **three loop dimensions $M\times N\times K$** — not because any matrix is a 3-D cube, but because a matmul $C = AB$ *has* three sizes: $A$ is $M\times K$, $B$ is $K\times N$, and the output $C$ is $M\times N$. The three numbers describe the whole operation. "**Square**" here means all three are equal ($M=N=K=8192$), so $A$, $B$, and $C$ are each an ordinary $8192\times8192$ matrix — nothing is a cube. Recall the FLOP count is $2MNK$ (each of the $M\times N$ outputs is a length-$K$ dot product), which is why all three sizes appear.
+
 Concretely, on a V100 (ridge ≈ 139 FLOP/byte):
 
-- A large square **$8192\times8192\times8192$** GEMM has AI ≈ **2730** — far above the ridge, comfortably **math-bound**. It reuses each byte thousands of times; the Tensor Cores run near peak.
-- A skinny **$8192\times128\times8192$** GEMM has AI ≈ **124** — *below* the ridge, so it is **memory-bound** despite being a huge matmul. The thin $K=128$ dimension kills reuse.
+- A large square **$8192\times8192\times8192$** GEMM ($M=N=K=8192$) has AI ≈ **2730** — far above the ridge, comfortably **math-bound**. It reuses each byte thousands of times; the Tensor Cores run near peak.
+- A skinny **$8192\times128\times8192$** GEMM ($M=8192,\ N=128,\ K=8192$) has AI ≈ **124** — *below* the ridge, so it is **memory-bound** despite being a huge matmul. The thin $N=128$ dimension kills reuse.
 - A **GEMV** (or an elementwise op like ReLU) has AI **< 1** — hopelessly memory-bound. There is essentially no reuse: you read each number, do one or two FLOPs, and move on.
 
 ### 2.3 Why this is the crux of the whole note
@@ -156,18 +239,24 @@ Here is the lesson that Parts 4 and 6 both cash in: **if you are memory-bound, a
 
 You don't need the microarchitecture nitty-gritty to get the one idea that matters. It is a difference of **goal**, and everything else follows.
 
+First, one word we will lean on: a **thread** is just *one independent little stream of work* — a single sequence of instructions operating on its own data. In a matmul, you can think of one thread as being responsible for computing one (or a few) output element(s) of $C$. It is a unit of *work*, not a piece of hardware: a thread is executed *by* a physical arithmetic lane, but the same lane runs many different threads over time. A GPU's whole strategy is to have a huge backlog of these independent threads ready to go. (So a thread is **not** a Tensor Core — the Tensor Core is silicon that *does* arithmetic; a thread is a task that gets *run on* such silicon.)
+
 ### 3.1 Latency cores vs throughput cores
 
-A **CPU is built to finish a single thread as fast as possible** — to minimize *latency*. Because most code is a serial chain of dependent steps sprinkled with unpredictable branches, a CPU spends most of its transistors *not* on arithmetic but on making one thread fast: large caches (so data is close), out-of-order execution and branch prediction (so it never stalls waiting to discover what to do next), deep pipelines. It has a handful of these big, clever cores.
+A **CPU is built to finish a single thread as fast as possible** — to minimize *latency*, the delay until that one task is done. Because most everyday code is a serial chain of dependent steps sprinkled with unpredictable branches (if/else decisions), a CPU spends most of its transistors *not* on arithmetic but on making one thread fast: large caches (so data is close), out-of-order execution and branch prediction (so it never sits idle waiting to discover what to do next), deep pipelines. It has a handful of these big, clever cores.
 
-A **GPU is built to finish an enormous number of independent threads per second** — to maximize *throughput*. It spends its transistors on thousands of small, simple arithmetic lanes and almost nothing on cleverness per lane. When one group of threads stalls waiting on memory, the GPU doesn't try to avoid the stall (as a CPU would); it just **switches to another group that is ready**, keeping the arithmetic units busy. It hides latency behind sheer parallelism instead of fighting it.
+A **GPU is built to finish an enormous number of independent threads per second** — to maximize *throughput* (total work per second), not the latency of any one thread. It spends its transistors on thousands of small, simple arithmetic lanes and almost nothing on cleverness per lane. Here is the key move. When a thread needs a value from HBM, it must **stall** — sit and wait hundreds of cycles for that far-off memory to respond (recall HBM is off-die and slow). A CPU pours hardware into *avoiding* such stalls. A GPU does the opposite: it accepts the stall and simply **switches to another batch of threads that already have their data and are ready to compute**, keeping the arithmetic lanes busy the whole time. By the time it cycles back, the stalled batch's data has arrived. So instead of *fighting* memory latency with expensive machinery, the GPU **hides** it behind a deep pile of independent work. This only works because it has thousands of ready threads to switch among — which is exactly why GPUs want massively parallel workloads like matmul.
 
 ![Two floorplan cartoons side by side. Left, the CPU: a few large boxes labeled "core" plus a big band labeled "large caches + control (out-of-order, branch prediction)" — most of the area is control and cache. Right, the GPU: a dense grid of many small boxes (the arithmetic lanes) filling almost the entire chip, with only a thin band of "small caches / control" at the bottom.](./assets/cpu_vs_gpu_cores.jpg){ width=100% }
-*The design split in one picture: a CPU spends area on a few fat latency-optimized cores plus large caches/control; a GPU spends area on a sea of thin throughput-optimized lanes. (Schematic, recreated; a standard illustration in the CUDA / NVIDIA GPU-architecture literature.)*
+*The design split in one picture: a CPU spends area on a few fat latency-optimized cores plus large caches/control; a GPU spends area on a sea of thin throughput-optimized lanes. **Each green cell here is one arithmetic lane (a CUDA core), not an SM** — lanes are grouped into SMs (each with its own SRAM, scheduler, and Tensor Cores), as drawn in the §1.6 chip map. (Schematic, recreated; a standard illustration in the CUDA / NVIDIA GPU-architecture literature.)*
 
 ### 3.2 SIMT, warps, and occupancy
 
-The GPU's simple lanes are ganged together: a **warp** of 32 threads executes the same instruction at the same time on 32 different data elements (the **SIMT**, single-instruction-multiple-thread, model). This is cheap because 32 lanes share one instruction decoder — it is why a GPU can afford so many lanes. The flip side is that heavily branchy code (where threads in a warp want to do different things) runs poorly; matmul, where every lane does the identical multiply-add, is the perfect fit.
+The GPU's simple lanes are not steered one at a time — they are ganged together in groups of 32. A **warp** is a group of **32 threads that all execute the *same* instruction at the same time**, each on its own data element (this is the **SIMT** model — single instruction, multiple threads). Picture 32 workers who must all perform the identical step in lockstep, differing only in the numbers in front of them.
+
+Why gang them like this? Because of the **instruction decoder** — the piece of control hardware that reads the next instruction (say "multiply these two numbers") and works out exactly which switches the arithmetic lane must flip to carry it out. That decoding machinery is expensive in transistors and power. If every lane needed its own decoder, you could afford far fewer lanes. SIMT's trick is to make **32 lanes share a single decoder**: decode the instruction once, then broadcast it to all 32. That is what lets a GPU pack in thousands of lanes — it skimps on control and spends the silicon on raw arithmetic.
+
+The catch is the flip side of that sharing. Because the 32 lanes are forced to run the *same* instruction, they run poorly on **branchy code** — code full of `if/else` decisions where different threads would take different paths. When threads in a warp disagree (some want the `if` branch, some the `else`), the hardware cannot run both at once with one shared decoder, so it runs the two paths **one after the other**, masking off (idling) the lanes that don't belong to the branch currently executing. That is called *warp divergence*, and it wastes exactly the lanes that sit idle. This is why GPUs love regular, decision-free number-crunching and dislike tangled control flow. **Matmul is the ideal case:** every lane does the identical multiply-add with no branching, so all 32 stay busy and nothing is wasted.
 
 **Occupancy** is the term for having enough warps resident on each SM so that whenever some are stalled on memory, others are ready to run. High occupancy is how the "hide latency behind parallelism" trick actually works — you need a deep enough backlog of ready warps to paper over the long trip to HBM.
 
