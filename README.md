@@ -192,6 +192,25 @@ This repository contains personal notes and learning material. The goal is to bu
   - [Choosing a loss: a practical map](ContrastiveLosses.md#choosing-a-loss-a-practical-map)
   - [Sources](ContrastiveLosses.md#sources)
 
+- **[Floating-Point Precision and Quantization: FP32, BF16, FP8, MXFP8, INT8, and the 4-/2-bit World](floating_precison.md)**
+  - [Setup and Notation](floating_precison.md#setup-and-notation)
+  - [1. Why precision is a first-class decision](floating_precison.md#1-why-precision-is-a-first-class-decision)
+  - [2. How a handful of bits becomes a number](floating_precison.md#2-how-a-handful-of-bits-becomes-a-number)
+  - [3. The everyday formats: FP32, FP16, BF16](floating_precison.md#3-the-everyday-formats-fp32-fp16-bf16)
+  - [4. FP8: E4M3 and E5M2](floating_precison.md#4-fp8-e4m3-and-e5m2)
+  - [5. Integers instead of floats: INT8 and the quantization formula](floating_precison.md#5-integers-instead-of-floats-int8-and-the-quantization-formula)
+  - [6. Why one scale is not enough: microscaling and MXFP8](floating_precison.md#6-why-one-scale-is-not-enough-microscaling-and-mxfp8)
+    - [6.1 A short history of FP8 scaling recipes](floating_precison.md#61-a-short-history-of-fp8-scaling-recipes)
+  - [7. Hardware: what your GPU actually supports](floating_precison.md#7-hardware-what-your-gpu-actually-supports)
+  - [8. Going lower: 4-bit and 2-bit weight quantization](floating_precison.md#8-going-lower-4-bit-and-2-bit-weight-quantization)
+    - [8.1 GPTQ: round carefully using curvature](floating_precison.md#81-gptq-round-carefully-using-curvature)
+    - [8.2 AWQ: protect the channels that matter](floating_precison.md#82-awq-protect-the-channels-that-matter)
+    - [8.3 QuIP and QuIP#: making 2-bit respectable](floating_precison.md#83-quip-and-quip-making-2-bit-respectable)
+    - [8.4 NF4 and the practical 4-bit default](floating_precison.md#84-nf4-and-the-practical-4-bit-default)
+  - [9. 8-bit KV cache](floating_precison.md#9-8-bit-kv-cache)
+  - [10. Cheat sheet: picking a precision](floating_precison.md#10-cheat-sheet-picking-a-precision)
+  - [Sources](floating_precison.md#sources)
+
 ### training_llms/ — Training LLMs from Scratch
 
 - **[The Tokenizer: Turning Text into Integers an LLM Can Read](training_llms/001_tokeniser.md)**
@@ -316,5 +335,26 @@ This repository contains personal notes and learning material. The goal is to bu
     - [7.7 IsoFLOPs everywhere](training_llms/008_ScalingLaws.md#77-isoflops-everywhere)
   - [8. Recap — surprising and useful](training_llms/008_ScalingLaws.md#8-recap--surprising-and-useful)
   - [Sources](training_llms/008_ScalingLaws.md#sources)
+
+- **[LLM Decoding: from a Probability Distribution to Actual Words](training_llms/009_LLM_decoding.md)**
+  - [Setup and Notation](training_llms/009_LLM_decoding.md#setup-and-notation)
+  - [1. The one tension that explains every method](training_llms/009_LLM_decoding.md#1-the-one-tension-that-explains-every-method)
+  - [2. Greedy decoding](training_llms/009_LLM_decoding.md#2-greedy-decoding)
+  - [3. Beam search](training_llms/009_LLM_decoding.md#3-beam-search)
+    - [3.1 The idea: keep several hypotheses alive](training_llms/009_LLM_decoding.md#31-the-idea-keep-several-hypotheses-alive)
+    - [3.2 n-gram blocking and length penalty](training_llms/009_LLM_decoding.md#32-n-gram-blocking-and-length-penalty)
+    - [3.3 Why beam text still feels dull](training_llms/009_LLM_decoding.md#33-why-beam-text-still-feels-dull)
+  - [4. Sampling and temperature](training_llms/009_LLM_decoding.md#4-sampling-and-temperature)
+    - [4.1 Plain sampling](training_llms/009_LLM_decoding.md#41-plain-sampling)
+    - [4.2 Temperature](training_llms/009_LLM_decoding.md#42-temperature)
+  - [5. Top-k sampling](training_llms/009_LLM_decoding.md#5-top-k-sampling)
+  - [6. Top-p (nucleus) sampling](training_llms/009_LLM_decoding.md#6-top-p-nucleus-sampling)
+  - [7. Min-p sampling](training_llms/009_LLM_decoding.md#7-min-p-sampling)
+  - [8. Repetition, frequency, and presence penalties](training_llms/009_LLM_decoding.md#8-repetition-frequency-and-presence-penalties)
+    - [8.1 The order everything is applied in](training_llms/009_LLM_decoding.md#81-the-order-everything-is-applied-in)
+  - [9. A practical cheat-sheet](training_llms/009_LLM_decoding.md#9-a-practical-cheat-sheet)
+  - [10. A note on speculative decoding (different axis)](training_llms/009_LLM_decoding.md#10-a-note-on-speculative-decoding-different-axis)
+  - [Recap](training_llms/009_LLM_decoding.md#recap)
+  - [Sources](training_llms/009_LLM_decoding.md#sources)
 
 <!-- END AUTO-TOC -->
