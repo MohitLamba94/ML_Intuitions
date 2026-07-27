@@ -136,7 +136,7 @@ This repository contains personal notes and learning material. The goal is to bu
   - [Part 1 — Why the *shape* of a matrix changes its speed (128 vs 125)](gpu-tpu-matmul-flashattention.md#part-1--why-the-shape-of-a-matrix-changes-its-speed-128-vs-125)
   - [Part 2 — The roofline: memory-bound vs math-bound](gpu-tpu-matmul-flashattention.md#part-2--the-roofline-memory-bound-vs-math-bound)
   - [Part 3 — GPU vs CPU: the fundamental difference](gpu-tpu-matmul-flashattention.md#part-3--gpu-vs-cpu-the-fundamental-difference)
-  - [Part 4 — TPUs and the systolic array](gpu-tpu-matmul-flashattention.md#part-4--tpus-and-the-systolic-array)
+  - [Part 4 — TPUs, the systolic array, and how they differ from GPUs](gpu-tpu-matmul-flashattention.md#part-4--tpus-the-systolic-array-and-how-they-differ-from-gpus)
   - [Part 5 — A100 → H100 → B200: what changed and why](gpu-tpu-matmul-flashattention.md#part-5--a100--h100--b200-what-changed-and-why)
   - [Part 6 — FlashAttention: same math, far less data movement](gpu-tpu-matmul-flashattention.md#part-6--flashattention-same-math-far-less-data-movement)
   - [Part 7 — Kernel fusion and Triton: how you actually write a data-light kernel](gpu-tpu-matmul-flashattention.md#part-7--kernel-fusion-and-triton-how-you-actually-write-a-data-light-kernel)

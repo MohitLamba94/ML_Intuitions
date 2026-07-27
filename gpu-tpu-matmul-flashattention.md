@@ -17,7 +17,7 @@ We assume you are comfortable with what a matrix multiply *is* and with undergra
 - [Part 1 — Why the *shape* of a matrix changes its speed (128 vs 125)](#part-1--why-the-shape-of-a-matrix-changes-its-speed-128-vs-125)
 - [Part 2 — The roofline: memory-bound vs math-bound](#part-2--the-roofline-memory-bound-vs-math-bound)
 - [Part 3 — GPU vs CPU: the fundamental difference](#part-3--gpu-vs-cpu-the-fundamental-difference)
-- [Part 4 — TPUs and the systolic array](#part-4--tpus-and-the-systolic-array)
+- [Part 4 — TPUs, the systolic array, and how they differ from GPUs](#part-4--tpus-the-systolic-array-and-how-they-differ-from-gpus)
 - [Part 5 — A100 → H100 → B200: what changed and why](#part-5--a100--h100--b200-what-changed-and-why)
 - [Part 6 — FlashAttention: same math, far less data movement](#part-6--flashattention-same-math-far-less-data-movement)
 - [Part 7 — Kernel fusion and Triton: how you actually write a data-light kernel](#part-7--kernel-fusion-and-triton-how-you-actually-write-a-data-light-kernel)
@@ -276,26 +276,93 @@ The A100 concretely: 108 SMs, a 40 MB L2 cache, and 40–80 GB of HBM at roughly
 
 ---
 
-## Part 4 — TPUs and the systolic array
+## Part 4 — TPUs, the systolic array, and how they differ from GPUs
 
-If the GPU is a general throughput machine, the **TPU** (Google's Tensor Processing Unit) is the answer to a sharper question: *if you already know the workload is almost entirely matrix multiply, how little hardware can you get away with?*
+The GPU of Part 3 is a *general* throughput machine: a sea of small, independent lanes that will run almost any parallel workload. The **TPU** (Google's Tensor Processing Unit) answers a narrower, sharper question: *if you already know the workload is almost entirely matrix multiply, how little hardware can you get away with — and how do you spend what's left?* The one-sentence answer, which the rest of Part 4 unpacks, is that **a TPU is a giant matrix-multiply engine bolted directly to a stack of fast memory**, with almost everything a general CPU/GPU spends silicon on stripped away.
 
 ### 4.1 Why build one at all
 
-Google measured that MLPs, CNNs, and LSTMs — all dominated by matmul — made up **95% of their datacenters' neural-network inference demand**. For that workload, most of a CPU's (and much of a GPU's) transistor budget — caches, branch predictors, out-of-order machinery — is *overhead*: silicon and power spent making irregular general-purpose code fast, which a wall of matmuls simply doesn't need. A domain-specific chip can delete all of that and spend the area on multiply-accumulate units instead.
+Google measured that a handful of models — MLPs, CNNs, and LSTMs, all dominated by matmul — made up about **95% of their datacenters' neural-network inference demand**. When one operation is *that* dominant, most of a CPU's (and much of a GPU's) transistor budget looks like waste: caches, branch predictors, out-of-order machinery, and per-lane instruction decoders all exist to make *unpredictable, branchy* general-purpose code fast (recall Part 3), and a wall of matmuls is neither unpredictable nor branchy. A domain-specific chip can **delete all of that** and pour the reclaimed silicon and power into the only thing the workload needs: **multiply-accumulate (MAC) units** — the little circuits that each compute one "multiply two numbers and add to a running total," the atom of every dot product.
 
-### 4.2 The systolic array: reuse baked into the wiring
+### 4.2 The systolic array: how it actually multiplies
 
-The heart of the first TPU is a **systolic array**: a $256\times256$ grid of **65,536 multiply-accumulate (MAC) units**. Instead of each MAC fetching its operands from memory, operands **flow through the grid** — activations stream in from one edge, weights are held in place, and each value that enters is **reused across an entire row or column of MACs** as it propagates. Partial sums accumulate as they march through. The name "systolic" is the analogy to a heartbeat pumping data rhythmically through the array.
+The heart of the first TPU is a **systolic array**: a $256\times256$ grid of **65,536 MAC units** wired directly to their neighbors. To see why this shape wins, first look at what a *normal* processor wastes.
 
-![A 4×4 grid of boxes labeled "MAC". Green arrows enter from the left ("activations flow in →"), amber arrows enter from the top ("weights held in place ↓"), and gray arrows exit the bottom ("partial sums accumulate out the bottom"). The picture conveys that each value entering an edge is reused by every MAC along its row or column.](./assets/systolic_array.jpg){ width=62% }
-*A systolic array (small 4×4 stand-in for the TPU's 256×256). One value read from memory feeds a whole row or column of multipliers as it flows through — reuse is built into the wiring, not managed in software. (Schematic, recreated; the 256×256 / 65,536-MAC design is from Jouppi et al., "In-Datacenter Performance Analysis of a TPU," 2017.)*
+**The tax it removes.** On a CPU or GPU, every single multiply-add reads its two operands from the register file, multiplies, and writes the result *back* to a register — a memory round-trip per MAC. But a matrix multiply has a special property: it **reuses each input value many times** (from Part 1, each element of $A$ is used in $N$ outputs, each element of $B$ in $M$). Paying a fresh register read/write for every use of a value you already have on-chip is pure overhead. The systolic array's whole idea is to **read each value once and then let it flow from one MAC straight into the next**, so partial results pass cell-to-cell *without ever going back to memory* in between.
 
-Why this is the right shape: it is Part 2's "move less data" principle turned into physical wiring. In a naive matmul each MAC would need its own operand fetch; in a systolic array **one HBM read feeds many multiplies** because the value physically travels past many MACs. Arithmetic intensity is maximized by the layout itself, so the array can run near peak with a modest memory system — the original TPU pairs it with a large (28 MiB) *software-managed* on-chip buffer instead of a cache hierarchy.
+**The bucket-brigade picture.** The cleanest analogy: putting out a fire with water from a well.
 
-### 4.3 The design philosophy: deterministic and lean
+- A **CPU** is one worker who runs to the well, fills a bucket, walks back, throws it — then runs to the well again. Correct, but almost all the time is spent running back and forth (to memory).
+- A **GPU** is *thousands* of workers all running to the well at once. Far more water per minute (throughput), but every worker still makes the round trip, so you pay enormous congestion and energy for all those trips.
+- A **systolic array** is a **bucket brigade**: the workers stand in a line and pass buckets hand to hand. Water flows down the chain; nobody runs back to the well between steps. Data moves neighbor-to-neighbor through the grid, and the trip to memory happens *once* at the end of the line.
 
-Because the workload is regular, the TPU drops the features that make general chips complex: **no caches, no branch prediction, no out-of-order execution, no speculation.** Execution is **deterministic**, which also makes it easy to hit a tight 99th-percentile latency target for serving. The result is a chip that is small and low-power for its throughput: the 2017 paper reports roughly **15–30× the performance** and **30–80× the performance-per-watt** of contemporary CPUs and GPUs on those inference workloads (with the usual caveats — it was measured against 2015-era parts, and later GPUs with better memory closed much of the gap). The durable lesson is not the specific multiplier but the principle: **specialize the silicon to the workload and you can delete everything the workload doesn't use.**
+**The mechanics (weights held stationary, activations flowing).** Concretely, the array runs a matmul like this:
+
+1. **Load the weights and pin them.** Each of the $256\times256$ cells is preloaded with one weight value, which then **stays put** for the whole matmul.
+2. **Stream the activations in from the left**, one per row, marching rightward one cell per clock cycle.
+3. **Each cell does one job every cycle:** multiply the activation passing through it by its resident weight, **add** the partial sum arriving from the cell above, then pass the activation **right** to its neighbor and the updated partial sum **down**.
+4. Partial sums accumulate as they travel down each column, so **one full column produces one complete dot-product**, which drops out the bottom into an accumulator and then through an activation unit.
+
+![A 4×4 grid of MAC cells, each holding a resident weight w_ij. Amber arrows at the top show weights preloaded and held stationary. Green arrows enter from the left carrying activations a1..a4, staggered on a diagonal so lower rows enter later (the "wavefront"), and pass rightward cell to cell. Gray arrows carry partial sums downward, accumulating through each column into an "accumulators → activation unit" bar at the bottom where finished dot-products fall out. A caption notes each activation feeds every cell along its row and data passes cell-to-cell, never back to memory between MACs.](./assets/systolic_array.jpg){ width=88% }
+*A systolic array (a small $4\times4$ stand-in for the TPU's $256\times256$). Weights sit still; activations flow left→right and partial sums flow top→bottom, so one value read from the buffer feeds a whole row of multipliers and each column accumulates a full dot-product — reuse is built into the wiring, not managed in software. Note the staggered "wavefront" entry (below). (Schematic, recreated; the $256\times256$ / 65,536-MAC design is from Jouppi et al. 2017, with the dataflow following Google Cloud's TPU explainer.)*
+
+**Why the staggered entry.** Notice in the figure that the activation rows don't all enter at once — row 2 starts one cycle after row 1, row 3 one after row 2, and so on, a **diagonal "wavefront."** This skew is what makes the whole thing line up: it guarantees that at every cell the correct activation and the correct accumulating partial sum *arrive on the same cycle*. Data pulses through the grid rhythmically, in lockstep — which is exactly why it's called **"systolic,"** after the *systole*, the rhythmic contraction of a beating heart pumping blood.
+
+**The reuse, quantified.** In the full $256\times256$ array, a single activation read from the on-chip buffer is **reused across all 256 cells in its row** as it streams through, and each column accumulates **256 multiplications** into one dot-product. So one memory read fans out into hundreds of MACs. This is Part 2's "move less data" principle turned into physical wiring: arithmetic intensity is maximized by the *layout itself*, so the array runs near peak while touching memory rarely.
+
+### 4.3 Why this is so efficient
+
+The payoff of that wiring is mostly about **energy and area**, and it comes from a brutal physical fact: on a modern chip, **reading a value from DRAM costs on the order of 200× the energy of a single multiply-accumulate.** Moving data, not doing math, is what burns the power. So an architecture whose entire point is to *avoid re-reading data* — read once, then reuse 256× as it flows through — wins enormously on operations-per-watt. Three things stack up:
+
+- **No register/memory access between MACs.** Results pass directly cell-to-cell, so you skip the read-write round-trip that a CPU/GPU pays on every operation.
+- **Short, local wires.** Each cell talks only to its immediate neighbors, so signals travel over tiny wires instead of across the chip to a shared register file — and wire energy dominates modern designs.
+- **Almost no control overhead.** Each cell only ever multiply-adds; there is no per-operation instruction decode. Control logic is under **2% of the die**, and roughly **90% of the silicon does useful arithmetic** (versus ~30% on a typical GPU). A single instruction can fire all ~65,000 MACs at once.
+
+This is the same lesson as Part 2, from the hardware side: matmul is one of the rare operations with far more compute than data ($O(n^3)$ FLOPs on $O(n^2)$ bytes), and the systolic array is a machine built to live in exactly that compute-rich regime, keeping its MACs saturated instead of starving on memory bandwidth.
+
+### 4.4 The rest of the chip
+
+The systolic array — Google calls it the **MXU (Matrix Multiply Unit)** — is the engine, but a few supporting pieces complete the v1 chip, and one of them matters for the GPU contrast:
+
+- **Unified Buffer:** a large **software-managed** on-chip SRAM (**28 MiB**) that feeds activations into the MXU and catches results. "Software-managed" is the key phrase — unlike a GPU's *hardware* caches, which guess what to keep resident, here the compiler decides explicitly what sits on-chip and when. The regular, predictable matmul workload makes that scheduling possible.
+- **Systolic Data Setup:** the unit that applies the staggered "wavefront" skew to activations before they enter the array.
+- **Accumulators + activation unit:** partial sums land in accumulators, then pass through hardware activation functions (ReLU/sigmoid/…) — the nonlinearity that makes it a *neural network* rather than one giant linear map.
+
+The v1 TPU is not a standalone computer: it is a **coprocessor on a PCIe card**, driven by a host CPU that sends it a handful of high-level, **CISC-style instructions** (`Read_Weights`, `MatrixMultiply`, `Activate`, …) where a *single* instruction triggers a massive matrix operation. And because the workload is regular, the chip is deliberately **deterministic** — no caches, branch prediction, out-of-order execution, or speculation — which makes its latency predictable, a real advantage for hitting a tight serving deadline (e.g. a 7 ms 99th-percentile budget). Concretely, v1 was **inference-only, 8-bit integer**, a $256\times256$ array at 700 MHz delivering ~92 TeraOps/s in 28 nm at ~40 W.
+
+### 4.5 GPU vs TPU: many small engines vs one big one
+
+Now the head-to-head. The sharpest contrast is simply **how many compute engines there are, and how each keeps them fed.**
+
+- **Count.** An H100 has **132 SMs** (a B200, 148) — a *crowd* of small, independent cores. A TPU has **at most about 2** big Tensor Cores. Many small generalists versus one enormous purpose-built machine.
+- **How the ALUs stay busy.** This is the deepest difference. A **GPU hides memory latency with parallelism** (Part 3): it keeps far more warps resident than it can run, and when one stalls waiting on HBM, the scheduler instantly switches to another that's ready. A **TPU instead bakes reuse into the wiring**: it is essentially single-threaded, statically pipelined by the compiler, and relies on data physically flowing through the array so values are reused without re-fetching. The GPU *tolerates* the memory trip by hiding it; the TPU *avoids* it by construction.
+- **Memory.** The GPU has a deep, mostly **hardware-managed** hierarchy (registers → L1/SMEM → L2 → HBM). The TPU has one big **software-managed** scratchpad (the Unified Buffer, and on modern TPUs a ~128 MB "VMEM"), with the compiler placing every transfer.
+- **Programming model.** GPU is **SIMT** — warps of 32 threads, each with its own instruction pointer, *able to diverge* on branches (at a cost). TPU is **VLIW + systolic** — one wide, statically scheduled instruction stream driving uniform lanes, with no cheap way to branch mid-array.
+
+![Two side-by-side panels. Left, "GPU — many small engines, latency hidden by parallelism": a grid of ~24 small SM boxes labelled "~100+ SMs, each a small independent core", a warp-scheduler band reading "keeps many threads in flight; when one stalls on memory, instantly run another", and a band for the deep hardware-managed cache hierarchy registers→L1/SMEM→L2→HBM. Right, "TPU — one big engine, reuse wired into the array": a big green "Unified Buffer / VMEM — one big software-managed on-chip scratchpad" feeding down into one large MXU systolic-array grid, with activations entering from the left and results flowing out the bottom, annotated "one read → many MACs".](./assets/gpu_vs_tpu.jpg){ width=100% }
+*The architectural split. A GPU spreads work over ~100+ small SMs and hides the memory latency by juggling many threads; a TPU pours the silicon into one huge systolic MXU fed by a large software-managed buffer, so a value read once is reused across the whole array. (Schematic, recreated; the "many small vs few large" framing and the memory-hierarchy comparison follow the JAX "How to Scale Your Model" TPU/GPU chapters.)*
+
+The consequence is a clean trade-off. Because the GPU descends from graphics hardware built for versatility, it **"just works"** on almost anything — branchy code, sparse or dynamically-shaped tensors, brand-new operations — backed by the huge CUDA ecosystem. The TPU is a **domain-specific matmul machine**: unbeatable operations-per-watt and per-dollar *when the workload really is large, dense, statically-shaped matmuls*, and awkward or wasteful the moment it isn't (anything that isn't a big matmul falls back to a small vector unit and leaves the MXU idle).
+
+### 4.6 How TPUs evolved
+
+TPU v1 was a deliberately minimal proof of concept — inference-only, int8, on-chip SRAM, one array on a PCIe card. Every generation since has kept the systolic MXU at the center while adding what v1 lacked for *training at scale*: higher-precision floats, big off-chip memory, and networking to gang many chips together.
+
+| Gen (year) | What it added |
+| --- | --- |
+| **v1** (2015) | Inference only, int8, single $256\times256$ MXU, 28 MiB SRAM, PCIe coprocessor |
+| **v2** (2017) | **Training** support; **bfloat16**; **HBM** for large capacity/bandwidth; **ICI** interconnect → chips gang into "pods" |
+| **v3** | More MXUs and HBM per chip; larger pods |
+| **v4** (2021) | **SparseCores** for embeddings; **optical circuit switches**; ~4,096-chip pods (≈ an exaflop) |
+| **v5e / v5p** | Split into **inference-optimized** (v5e) vs **training-optimized** (v5p, more HBM + interconnect) |
+| **v6e "Trillium"** | MXU **doubled back to $256\times256$**; 32 GB HBM |
+| **v7 "Ironwood"** (2025) | Inference-at-scale focus; ~4,614 TFLOP/s and 192 GB HBM at 7.4 TB/s per chip; up to 9,216 chips in one domain |
+
+Two structural notes tie this back to the rest of the note. First, the **modern mental model** of a TPU core is *MXU + a vector unit (VPU) + a fast on-chip scratchpad (VMEM), bolted to a stack of HBM* — the same "compute engine + memory hierarchy" shape as a GPU, just with far fewer, far larger engines. Second, chips are wired into a **2D or 3D torus**: each TPU talks only to its nearest neighbors, with the ends wrapped around. There are **no expensive switches** (contrast NVIDIA's NVLink/NVSwitch, which approximate all-to-all connectivity): the torus is cheaper, lower-power, and deterministic, and it perfectly matches the uniform all-reduce/all-gather traffic of training — at the cost of more hops between distant chips. And one Part 1 quirk reappears here: matmul dimensions should be padded to fill the MXU (**128, or 256 on v6e**), or the array runs with empty lanes — the same "fit the hardware's fixed block size" lesson as tile quantization.
+
+### 4.7 The takeaway
+
+The durable lesson is not any specific speedup number (the 2017 paper's headline **15–30× throughput** and **30–80× perf-per-watt** were measured against 2015-era CPUs and a K80 GPU on inference-only int8, and later GPUs with better memory closed much of the gap). It is the **design principle**: *specialize the silicon to the workload and you can delete everything the workload doesn't use* — caches, branch prediction, speculation, even multiple independent cores — and spend the reclaimed area and power on arithmetic and on keeping that arithmetic fed. A GPU keeps its options open and hides the memory bottleneck; a TPU commits to matmul and *designs the bottleneck away* by wiring reuse into the array. Either way, the winning move is the one this whole note keeps repeating: **keep the data close, and move less of it.**
 
 ---
 
@@ -619,7 +686,12 @@ The whole part is one number chased through the stack: the arithmetic intensity 
 - **NVIDIA — Matrix Multiplication Background User's Guide.** The definitive explanation of tiling, tile/wave quantization, Tensor Core alignment, and arithmetic intensity for GEMMs. <https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/>
 - **NVIDIA — GPU Performance Background User's Guide.** SMs, the SIMT/warp model, the memory hierarchy, and the math-bound vs memory-bound / ops:byte framing. <https://docs.nvidia.com/deeplearning/performance/dl-performance-gpu-background/>
 - **NVIDIA — Hopper Architecture In-Depth** (developer blog). TMA, thread-block clusters and distributed shared memory, the Transformer Engine and FP8, HBM3, NVLink. <https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/>
-- **Jouppi et al., "In-Datacenter Performance Analysis of a Tensor Processing Unit" (ISCA 2017).** The systolic array, the deterministic design philosophy, and the CPU/GPU/TPU comparison. arXiv:1704.04760 — <https://arxiv.org/abs/1704.04760>
+- **Jouppi et al., "In-Datacenter Performance Analysis of a Tensor Processing Unit" (ISCA 2017).** The systolic array, the 28 MiB Unified Buffer, the CISC ISA, the deterministic design philosophy, the 95%-of-inference figure, and the CPU/GPU/TPU comparison. arXiv:1704.04760 — <https://arxiv.org/abs/1704.04760>
+- **Google Cloud — "An in-depth look at Google's first Tensor Processing Unit (TPU)."** The clearest intuition for the systolic array: read each value once and reuse it without writing back to a register; the ops-per-cycle scaling and control-logic-<2%-of-die framing. <https://cloud.google.com/blog/products/ai-machine-learning/an-in-depth-look-at-googles-first-tensor-processing-unit-tpu>
+- **"How to Scale Your Model" (JAX ML scaling book) — TPU and GPU chapters.** The "matmul engine bolted to memory" framing, the many-small-SMs vs one-big-Tensor-Core contrast, the software-managed VMEM scratchpad, and the torus interconnect. <https://jax-ml.github.io/scaling-book/tpus/> and <https://jax-ml.github.io/scaling-book/gpus/>
+- **ByteByteGo — "How Google's Tensor Processing Unit (TPU) Works."** The bucket-brigade analogy (CPU vs GPU vs systolic) and the ~90%-useful-silicon-vs-~30%-on-a-GPU figure. <https://blog.bytebytego.com/p/how-googles-tensor-processing-unit>
+- **Introl — "Google TPU Architecture: 7 Generations Explained."** The generation-by-generation evolution, the DRAM-read-≈-200×-a-MAC energy figure, and the torus/optical-switch scaling. <https://introl.com/blog/google-tpu-architecture-complete-guide-7-generations>
+- **William Pan — "How Systolic Arrays Work."** The staggered diagonal-wavefront staging and why the skew makes activations and partial sums meet on the right cycle. <https://williampan-personalwebsite.vercel.app/blog/systolic-array>
 - **Dao, Fu, Ermon, Rudra, Ré, "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness" (NeurIPS 2022).** IO-awareness, tiling + online softmax, recomputation, and the SRAM/HBM numbers. arXiv:2205.14135 — <https://arxiv.org/abs/2205.14135>
 - **NVIDIA Blackwell (B100/B200) architecture** — vendor materials and secondary summaries for the dual-die design, HBM3e, and the second-gen Transformer Engine / FP4. <https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/>
 - **OpenAI — "Introducing Triton: Open-source GPU programming for neural networks" (2021).** The tile-level (block, not thread) programming model, what the compiler automates, and the fused-softmax / matmul examples. <https://openai.com/index/triton/>
