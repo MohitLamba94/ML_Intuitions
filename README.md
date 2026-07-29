@@ -212,6 +212,45 @@ This repository contains personal notes and learning material. The goal is to bu
   - [10. Cheat sheet: picking a precision](floating_precison.md#10-cheat-sheet-picking-a-precision)
   - [Sources](floating_precison.md#sources)
 
+- **[Optimisers: SGD, Momentum, Adam, and AdamW](optimisers.md)**
+  - [Setup and Notation](optimisers.md#setup-and-notation)
+  - [From full-batch GD to SGD](optimisers.md#from-full-batch-gd-to-sgd)
+    - [The learning rate: the one knob you cannot ignore](optimisers.md#the-learning-rate-the-one-knob-you-cannot-ignore)
+    - [Why noise is both a curse and a feature](optimisers.md#why-noise-is-both-a-curse-and-a-feature)
+  - [Why plain SGD struggles: ravines and ill-conditioning](optimisers.md#why-plain-sgd-struggles-ravines-and-ill-conditioning)
+  - [SGD + Momentum](optimisers.md#sgd--momentum)
+    - [Nesterov: a look-ahead refinement](optimisers.md#nesterov-a-look-ahead-refinement)
+  - [Adaptive learning rates: Adagrad and RMSprop](optimisers.md#adaptive-learning-rates-adagrad-and-rmsprop)
+  - [Adam: momentum meets adaptivity](optimisers.md#adam-momentum-meets-adaptivity)
+    - [Why bias correction](optimisers.md#why-bias-correction)
+  - [AdamW: decoupled weight decay](optimisers.md#adamw-decoupled-weight-decay)
+  - [Other optimisers, briefly](optimisers.md#other-optimisers-briefly)
+  - [Practical guidance: what to actually use](optimisers.md#practical-guidance-what-to-actually-use)
+  - [Learning-rate schedules: the optimiser's silent partner](optimisers.md#learning-rate-schedules-the-optimisers-silent-partner)
+  - [Takeaways](optimisers.md#takeaways)
+  - [Sources](optimisers.md#sources)
+
+- **[Euler Angles vs. Quaternions (and the Other Ways to Store a Rotation)](euler_vs_quaternions.md)**
+  - [Setup and Notation](euler_vs_quaternions.md#setup-and-notation)
+  - [Why representing a rotation is subtle](euler_vs_quaternions.md#why-representing-a-rotation-is-subtle)
+  - [Rotation matrices: the ground truth](euler_vs_quaternions.md#rotation-matrices-the-ground-truth)
+  - [Euler angles: three turns in a row](euler_vs_quaternions.md#euler-angles-three-turns-in-a-row)
+    - [The convention trap: why the same three numbers give different rotations](euler_vs_quaternions.md#the-convention-trap-why-the-same-three-numbers-give-different-rotations)
+    - [Gimbal lock: losing a degree of freedom](euler_vs_quaternions.md#gimbal-lock-losing-a-degree-of-freedom)
+    - [Why Euler angles survive](euler_vs_quaternions.md#why-euler-angles-survive)
+  - [Axis-angle and the rotation vector](euler_vs_quaternions.md#axis-angle-and-the-rotation-vector)
+  - [Quaternions: the workhorse](euler_vs_quaternions.md#quaternions-the-workhorse)
+    - [The unit-sphere picture](euler_vs_quaternions.md#the-unit-sphere-picture)
+    - [Why quaternions dodge gimbal lock](euler_vs_quaternions.md#why-quaternions-dodge-gimbal-lock)
+    - [The double cover: two quaternions per rotation](euler_vs_quaternions.md#the-double-cover-two-quaternions-per-rotation)
+    - [SLERP: smooth interpolation](euler_vs_quaternions.md#slerp-smooth-interpolation)
+    - [The costs of quaternions](euler_vs_quaternions.md#the-costs-of-quaternions)
+  - [Side-by-side comparison](euler_vs_quaternions.md#side-by-side-comparison)
+  - [Newer representations: continuity for neural networks](euler_vs_quaternions.md#newer-representations-continuity-for-neural-networks)
+  - [Which representation should I use?](euler_vs_quaternions.md#which-representation-should-i-use)
+  - [Takeaways](euler_vs_quaternions.md#takeaways)
+  - [Sources](euler_vs_quaternions.md#sources)
+
 ### training_llms/ — Training LLMs from Scratch
 
 - **[The Tokenizer: Turning Text into Integers an LLM Can Read](training_llms/001_tokeniser.md)**
