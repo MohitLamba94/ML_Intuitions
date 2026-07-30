@@ -185,11 +185,96 @@ $$
 \mathcal{L}_{\text{balance}} = \alpha \, N \sum_{i=1}^{N} f_i \, P_i
 $$
 
-Let us unpack why this simple product does the job. Both $f_i$ and $P_i$ are, ideally, $1/N$ when load is perfectly uniform (every expert gets its equal share of tokens *and* equal average probability). Their sum $\sum_i f_i P_i$ is minimized exactly when both are flat at $1/N$, and it grows whenever the router piles probability and tokens onto a few experts. The factor $N$ just rescales the loss so it stays around 1 regardless of how many experts you have, which keeps $\alpha$ meaningful across model sizes.
+Let us unpack why this simple product does the job. Both $f_i$ and $P_i$ are, ideally, $1/N$ when load is perfectly uniform (every expert gets its equal share of tokens *and* equal average probability). Because $f$ and $P$ both come from the *same* router — tokens get dispatched to exactly the experts the router scores highest — the two are strongly correlated: where $P_i$ is large, $f_i$ is large too. Under that coupling the sum $\sum_i f_i P_i$ behaves like $\sum_i P_i^2$, which is minimized precisely when the distribution is flat at $1/N$ and grows whenever the router piles probability and tokens onto a few experts. (The coupling matters — see the entropy aside below for why the product is *not* minimized at uniform if you let $f$ and $P$ vary independently.) The factor $N$ just rescales the loss so it stays around 1 regardless of how many experts you have, which keeps $\alpha$ meaningful across model sizes.
 
 **Why the product of two terms, and not just one?** This is the clever part. $f_i$ is a *count* — it involves the discrete top-$k$ selection, so it has no useful gradient (you cannot differentiate "which expert won"). $P_i$ is the *soft* router probability, which is fully differentiable. By multiplying them, the loss uses $f_i$ as a (constant, gradient-free) *weight* that measures the actual observed load, and lets the gradient flow through $P_i$. The effect: for an expert that is currently overloaded (large $f_i$), the loss pushes its router probability $P_i$ *down*; for a starved expert, there is little penalty and its probability is free to rise. Over many steps this steadily equalizes the load. The figure below shows this for the two-expert case — the loss is a bowl with its minimum exactly at the balanced split.
 
 ![A U-shaped curve of the auxiliary load-balancing loss for two experts as a function of the fraction of tokens sent to expert 1. The curve reaches its minimum at the balanced 50/50 split, marked in green, and rises to its maximum at the extremes where all tokens go to a single expert, marked in red as collapse.](./assets/moe_load_balancing.jpg){ width=72% }
+
+**A worked example (4 tokens, 2 experts, top-1).** Numbers make the "uniform is the minimum" claim concrete. Take $N = 2$ experts, a batch of $T = 4$ tokens, top-1 routing, and set $\alpha = 1$ so we read the raw $\mathcal{L}_{\text{balance}} = N\sum_i f_i P_i$. For each token the router emits a softmax over the two experts $(p_{\text{E1}}, p_{\text{E2}})$; top-1 dispatches the token to whichever is larger. Then:
+
+- $f_i$ = (tokens dispatched to expert $i$) $/\,4$,
+- $P_i$ = average of column $i$ of the per-token probabilities.
+
+We compare three routing patterns, from perfectly balanced to fully collapsed.
+
+**Case A — uniform** (2 tokens each way):
+
+| token | $p_{\text{E1}}$ | $p_{\text{E2}}$ | top-1 goes to |
+|---|---|---|---|
+| 1 | 0.8 | 0.2 | E1 |
+| 2 | 0.7 | 0.3 | E1 |
+| 3 | 0.2 | 0.8 | E2 |
+| 4 | 0.3 | 0.7 | E2 |
+
+$f = (\tfrac{2}{4}, \tfrac{2}{4}) = (0.5,\,0.5)$, and $P_1 = \tfrac{0.8+0.7+0.2+0.3}{4} = 0.5$, $P_2 = 0.5$.
+
+$$
+\mathcal{L}_A = 2\,(0.5 \cdot 0.5 + 0.5 \cdot 0.5) = 2 \cdot 0.5 = 1.0
+$$
+
+**Case B — in between** (3 tokens to E1, 1 to E2):
+
+| token | $p_{\text{E1}}$ | $p_{\text{E2}}$ | top-1 goes to |
+|---|---|---|---|
+| 1 | 0.8 | 0.2 | E1 |
+| 2 | 0.7 | 0.3 | E1 |
+| 3 | 0.6 | 0.4 | E1 |
+| 4 | 0.3 | 0.7 | E2 |
+
+$f = (0.75,\,0.25)$, and $P_1 = \tfrac{0.8+0.7+0.6+0.3}{4} = 0.6$, $P_2 = \tfrac{0.2+0.3+0.4+0.7}{4} = 0.4$.
+
+$$
+\mathcal{L}_B = 2\,(0.75 \cdot 0.6 + 0.25 \cdot 0.4) = 2 \cdot (0.45 + 0.10) = 1.1
+$$
+
+**Case C — very skewed** (all 4 tokens to E1 — routing collapse):
+
+| token | $p_{\text{E1}}$ | $p_{\text{E2}}$ | top-1 goes to |
+|---|---|---|---|
+| 1 | 0.90 | 0.10 | E1 |
+| 2 | 0.80 | 0.20 | E1 |
+| 3 | 0.85 | 0.15 | E1 |
+| 4 | 0.95 | 0.05 | E1 |
+
+$f = (1.0,\,0.0)$, and $P_1 = \tfrac{0.90+0.80+0.85+0.95}{4} = 0.875$, $P_2 = 0.125$.
+
+$$
+\mathcal{L}_C = 2\,(1.0 \cdot 0.875 + 0.0 \cdot 0.125) = 2 \cdot 0.875 = 1.75
+$$
+
+**Reading the result.** The three losses come out
+
+$$
+\underbrace{\mathcal{L}_A = 1.0}_{\text{uniform}} \;<\; \underbrace{\mathcal{L}_B = 1.1}_{\text{in between}} \;<\; \underbrace{\mathcal{L}_C = 1.75}_{\text{collapsed}},
+$$
+
+so the perfectly balanced split is the smallest and the loss climbs monotonically as routing skews. The uniform value is no coincidence: when both $f$ and $P$ are flat at $1/N$, the loss is $N \cdot \sum_i \tfrac{1}{N}\cdot\tfrac{1}{N} = N \cdot \tfrac{1}{N} = 1$, so the minimum is $\alpha \cdot 1$ *regardless of $N$* — which is exactly why the leading $N$ is there (it pins the balanced loss to $1$ so $\alpha$ means the same thing whether you have 2 experts or 256). Notice also that the penalty grows through *both* channels at once as things skew: the overloaded expert's $f_i$ rises **and** its $P_i$ rises, and their product is what the loss sums — the mechanism from the previous paragraph, now in numbers.
+
+Side by side, the three cases make the trend easy to read at a glance:
+
+| Case | dispatch (E1 / E2) | $f = (f_1, f_2)$ | $P = (P_1, P_2)$ | $\mathcal{L} = 2\sum_i f_i P_i$ |
+|---|---|---|---|---|
+| A — uniform | 2 / 2 | $(0.5,\ 0.5)$ | $(0.5,\ 0.5)$ | **1.00** |
+| B — in between | 3 / 1 | $(0.75,\ 0.25)$ | $(0.6,\ 0.4)$ | **1.10** |
+| C — collapsed | 4 / 0 | $(1.0,\ 0.0)$ | $(0.875,\ 0.125)$ | **1.75** |
+
+**Aside: isn't this just entropy?** It is natural to notice that this loss "wants a uniform distribution," and so does entropy $H(P) = -\sum_i P_i \log P_i$, which is *maximized* when $P$ is flat. The connection is real but worth stating precisely. Entropy and this loss belong to the same family of *concentration measures* — functions that detect how peaked versus flat a distribution is, and are therefore extremized at uniform. They differ in sign (entropy is concave, maximized at uniform; the balance loss is convex, minimized at uniform), so using entropy *as* a balancer would mean adding $-H(P)$ to the objective and maximizing it.
+
+The connection gets sharp on the "diagonal" $f_i \approx P_i$ (which the shared router roughly enforces): there the loss becomes
+
+$$
+\sum_i f_i P_i \approx \sum_i P_i^2 = \lVert P \rVert_2^2,
+$$
+
+the **collision probability**. Its negative log $-\log \sum_i P_i^2$ is exactly the **Rényi entropy of order 2** (collision entropy), just as Shannon entropy is the order-1 member of the same family. By Cauchy–Schwarz, $\sum_i P_i^2 \ge 1/N$ with equality *iff* $P$ is uniform — so minimizing it is the same uniformity pressure entropy gives, via a sibling functional.
+
+Two things keep it from being *literally* entropy, and the second is a deliberate design choice:
+
+- **It is a product of two distributions, not one.** Entropy takes a single distribution; this loss multiplies the gradient-free realized load $f_i$ by the differentiable probability $P_i$ (the trick explained just above). A plain entropy penalty on $P$ alone would regularize only the *soft* router outputs and stay blind to the *hard* top-$k$ assignment that actually causes collapse. Tying the gradient-bearing $P$ to the measured load $f$ is exactly what makes this loss more effective than an entropy term.
+- **"Minimized at uniform" needs the coupling.** If $f$ and $P$ were free, independent distributions, $\sum_i f_i P_i$ would be minimized (to $0$) by two *anti-correlated* spikes — all of $f$ on one expert, all of $P$ on another — the opposite of uniform. It lands at uniform only because $f$ and $P$ come from the same router (so they cannot anti-correlate) and $f$ is frozen as a constant weight, leaving the effective $\sum P_i^2$ bowl.
+
+So: not namesake — they are genuine siblings in the Rényi/concentration family — but the $f\cdot P$ form carries an engineering twist that a pure entropy loss does not.
 
 **Capacity factor and token dropping.** Balance alone is not enough for efficient hardware execution. On a GPU/TPU you want fixed-shape tensors, so each expert is given a fixed **capacity** $C$ — the maximum number of tokens it will accept in a batch. Capacity is set by a *capacity factor*:
 
