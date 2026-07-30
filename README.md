@@ -293,6 +293,18 @@ This repository contains personal notes and learning material. The goal is to bu
   - [14. A compact mental model](diffusion_renderer.md#14-a-compact-mental-model)
   - [Sources](diffusion_renderer.md#sources)
 
+- **[Gated Attention: One Sigmoid That Kills the Attention Sink](gated-attention.md)**
+  - [Setup and Notation](gated-attention.md#setup-and-notation)
+  - [A 30-second recap of softmax attention](gated-attention.md#a-30-second-recap-of-softmax-attention)
+  - [The gate: essentially one line of code](gated-attention.md#the-gate-essentially-one-line-of-code)
+  - [Why it helps I — non-linearity in a secretly-linear path](gated-attention.md#why-it-helps-i--non-linearity-in-a-secretly-linear-path)
+  - [Why it helps II — query-dependent sparsity](gated-attention.md#why-it-helps-ii--query-dependent-sparsity)
+  - [The payoff: draining the attention sink and massive activations](gated-attention.md#the-payoff-draining-the-attention-sink-and-massive-activations)
+  - [Long context and Qwen3-Next](gated-attention.md#long-context-and-qwen3-next)
+  - [What the ablations actually say](gated-attention.md#what-the-ablations-actually-say)
+  - [Takeaways](gated-attention.md#takeaways)
+  - [Sources](gated-attention.md#sources)
+
 ### training_llms/ — Training LLMs from Scratch
 
 - **[The Tokenizer: Turning Text into Integers an LLM Can Read](training_llms/001_tokeniser.md)**
