@@ -46,11 +46,32 @@ def sh(args):
     return subprocess.run(args, cwd=ROOT, capture_output=True, text=True).stdout
 
 
+def ignored_files(paths):
+    """Subset of `paths` that .gitignore excludes (per `git check-ignore`)."""
+    if not paths:
+        return set()
+    # --stdin reads NUL-safe paths; check-ignore prints the ones that ARE ignored.
+    res = subprocess.run(
+        ["git", "check-ignore", "--stdin"],
+        cwd=ROOT, capture_output=True, text=True,
+        input="\n".join(paths),
+    )
+    return set(l.strip() for l in res.stdout.splitlines() if l.strip())
+
+
 def list_md_files():
-    """All non-ignored .md files (tracked + untracked-but-not-ignored), minus README."""
+    """All non-ignored .md files (tracked + untracked-but-not-ignored), minus README.
+
+    `git ls-files --cached` still lists files that were tracked *before* being
+    added to .gitignore, so we additionally drop anything `git check-ignore`
+    flags — a note added to .gitignore is excluded whether or not it was ever
+    committed.
+    """
     tracked = sh(["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "*.md"])
     files = sorted(set(l.strip() for l in tracked.splitlines() if l.strip()))
-    return [f for f in files if os.path.basename(f) != "README.md"]
+    files = [f for f in files if os.path.basename(f) != "README.md"]
+    ignored = ignored_files(files)
+    return [f for f in files if f not in ignored]
 
 
 def creation_ts(relpath):
