@@ -71,24 +71,81 @@ The empirical verdict from the original Transformer paper and much follow-up wor
 
 ## Sinusoidal position encoding
 
-The original "Attention Is All You Need" Transformer used a **fixed, absolute** encoding built from sines and cosines. Here is the formula that trips everyone up on first read:
+The original Transformer used a **fixed, absolute** position encoding: compute a vector $PE_m$ from position $m$, then add it to the token embedding $x_m$. Its formula looks more mysterious than the underlying idea:
 
 $$
-PE_{m,\,2i}   = \sin\!\left(\frac{m}{10000^{\,2i/d}}\right), \qquad
-PE_{m,\,2i+1} = \cos\!\left(\frac{m}{10000^{\,2i/d}}\right)
+PE_{m,\,2i} = \sin(m\omega_i), \qquad
+PE_{m,\,2i+1} = \cos(m\omega_i), \qquad
+\omega_i = 10000^{-2i/d}
 $$
 
-Let's decode every piece. $m$ is the token's position (which row of the encoding we want). $d$ is the hidden dimension. The index $i$ runs over **dimension pairs**: $i = 0, 1, 2, \dots, d/2 - 1$. For each pair we fill *two* entries of the $d$-dimensional code — an even slot $2i$ with a sine and the neighboring odd slot $2i+1$ with a cosine. So the encoding is really $d/2$ independent (sine, cosine) pairs stacked together.
+Here $i = 0, 1, \ldots, d/2-1$ indexes a **pair** of dimensions. The even coordinate $2i$ stores the sine, the neighboring odd coordinate $2i+1$ stores the cosine, and $
+\omega_i$ is that pair's angular speed. The usual textbook explanation stops after saying that different pairs use different frequencies. The more useful picture is that every pair is a point moving around a unit circle:
 
-The one genuinely mysterious term is the denominator $10000^{2i/d}$, which sets the **frequency** of each pair. Read it as follows. Define the angle fed into the sinusoids as $m \cdot \omega_i$ where the frequency is $\omega_i = 1 / 10000^{2i/d} = 10000^{-2i/d}$. When $i = 0$ the exponent is $0$, so $\omega_0 = 1$ — the fastest oscillation, cycling as position increments by 1. As $i$ grows toward $d/2$, the exponent climbs toward $1$, so $\omega_i$ shrinks toward $1/10000$ — an extremely *slow* oscillation whose wavelength is thousands of positions. In other words, **the pairs form a geometric ladder of frequencies from very fast to very slow.** The base $10000$ just controls how slow the slowest pair gets (its longest wavelength ≈ $2\pi \cdot 10000$); it is a knob chosen so that the slowest wavelength comfortably exceeds any realistic sequence length.
+$$
+\begin{bmatrix}
+PE_{m,\,2i} \\
+PE_{m,\,2i+1}
+\end{bmatrix}
+=
+\begin{bmatrix}
+\sin(m\omega_i) \\
+\cos(m\omega_i)
+\end{bmatrix}
+$$
 
-Why a spectrum of frequencies rather than one? Because a single frequency cannot uniquely stamp a long range of positions — a sinusoid repeats. But a *bank* of many frequencies together forms something like a binary/Fourier code for position: the fast pairs flip quickly and pin down *fine* distinctions (position 5 vs. 6), while the slow pairs change gradually and pin down *coarse* distinctions (position 5 vs. 500). Reading all $d/2$ pairs at once identifies the position uniquely, the same way a set of clock hands ticking at different rates jointly tells the exact time.
+Because $\sin^2(m\omega_i)+\cos^2(m\omega_i)=1$, this pair always lies on the circle of radius one. Moving from $m$ to $m+1$ advances it by the fixed angle $\omega_i$. Position is therefore encoded as **rotation**, not as a number written directly into one coordinate.
+
+Why use many circles? Picture an old mechanical car odometer. Its rightmost wheel turns fastest: it steps through 0 to 9 and then returns to 0. The tens wheel moves more slowly, the hundreds wheel more slowly still, and so on. If you look only at the rightmost wheel and see a 7, you cannot tell whether the car has travelled 7, 17, or 10,007 miles. But read all the wheels together and their different turning speeds give you the mileage. The fast wheels resolve small changes; the slow wheels keep track of the larger scale.
+
+Sinusoidal encoding is a smooth version of that stack of wheels. Each pair $(\sin(m\omega_i),\cos(m\omega_i))$ records the angle of one wheel, while $m$ plays the role of distance travelled. There are no discrete digits or carry operations: all the wheels rotate continuously, each at its own speed. Since $\omega_i = 10000^{-2i/d}$ decreases geometrically as $i$ grows, low-index pairs are the fast wheels and high-index pairs are the slow wheels. Their periods are
+
+$$
+T_i = \frac{2\pi}{\omega_i} = 2\pi\,10000^{2i/d},
+$$
+
+where $T_i$ is the number of positions needed for pair $i$ to complete one turn. The first pair has period $T_0=2\pi\approx 6.3$ positions, while the final pairs have periods approaching $2\pi\cdot 10000$. Reading all pairs together gives each position a rich fingerprint: fast pairs carry fine positional detail and slow pairs carry coarse positional detail. Every coordinate also stays between $-1$ and $1$, and the formula can be evaluated beyond the sequence lengths used in training. That last fact means the encoding itself never runs out of rows; it does **not** guarantee that a model will behave well at unseen lengths.
 
 ![A heatmap of the sinusoidal position encoding, with embedding dimension i from 0 to 127 on the horizontal axis and position m from 0 to about 100 on the vertical axis; color runs from blue (negative) through white (zero) to red (positive). The left side (low dimensions) shows a fine, rapidly alternating checkerboard pattern that changes quickly with position; the right side (high dimensions) shows broad vertical bands that change only slowly with position. Annotations point to the left region labeled 'fast dims (distinguish nearby positions)' and the right region labeled 'slow dims (distinguish far-apart positions)'.](../assets/pe_sinusoidal_heatmap.jpg)
 
-The heatmap makes the frequency ladder visual: scanning down a *low-index* column (left), the color flips rapidly with position — fast oscillation; scanning down a *high-index* column (right), the color changes glacially — slow oscillation. Every position (row) therefore has a distinct fingerprint across the columns.
+The heatmap shows these wheels side by side. Down the low-index columns on the left, colors change rapidly because those pairs turn quickly. Down the high-index columns on the right, colors change gradually because those pairs turn slowly. A row is the joint reading of all the wheels at one position.
 
-There is one more elegant property, and it is the reason sines and cosines were chosen specifically. For any fixed offset $k$, the encoding at position $m+k$ can be written as a **fixed linear transformation** of the encoding at position $m$ — because rotating the angle by $k\omega_i$ is a linear map on each $(\sin, \cos)$ pair (the angle-addition formulas). Concretely, $\sin(m\omega + k\omega)$ and $\cos(m\omega + k\omega)$ are linear combinations of $\sin(m\omega)$ and $\cos(m\omega)$ with coefficients that depend only on $k$, not on $m$. This means the model can, in principle, learn to attend "3 tokens back" using a single position-independent operation — a first taste of **relative** behavior emerging from an *absolute* sinusoidal code. RoPE takes this insight and makes it the whole mechanism, rather than a lucky side effect.
+The multi-speed fingerprint is useful, but it is not the deepest reason for pairing sine with cosine. The crucial property is that **shifting a position becomes a fixed rotation**. Let $k$ be an integer offset. The angle-addition identities give
+
+$$
+\begin{aligned}
+\sin((m+k)\omega_i)
+&= \sin(m\omega_i)\cos(k\omega_i)
+ + \cos(m\omega_i)\sin(k\omega_i), \\
+\cos((m+k)\omega_i)
+&= \cos(m\omega_i)\cos(k\omega_i)
+ - \sin(m\omega_i)\sin(k\omega_i).
+\end{aligned}
+$$
+
+Both new coordinates are linear combinations of the old pair. In matrix form,
+
+$$
+\begin{bmatrix}
+PE_{m+k,\,2i} \\
+PE_{m+k,\,2i+1}
+\end{bmatrix}
+=
+\underbrace{
+\begin{bmatrix}
+\cos(k\omega_i) & \sin(k\omega_i) \\
+-\sin(k\omega_i) & \cos(k\omega_i)
+\end{bmatrix}
+}_{\text{depends on }k\text{, not }m}
+\begin{bmatrix}
+PE_{m,\,2i} \\
+PE_{m,\,2i+1}
+\end{bmatrix}.
+$$
+
+This is why the two channels belong together. A sine value alone is ambiguous and cannot express a shift linearly; its matching cosine supplies the missing coordinate on the circle. Together, “move forward by $k$ positions” means “apply this rotation,” and the same rotation works no matter where $m$ starts. It is like advancing a clock hand by twenty minutes: the required turn is fixed even though the hand's starting angle changes.
+
+That gives an absolute encoding a useful hint of relative structure. In principle, a linear layer can learn one transformation for “$k$ positions away” and reuse it throughout the sequence. But the position vector is still **added** to content, so attention sees content and position mixed together; the relative relationship is available only indirectly. RoPE keeps the same shift-as-rotation idea but applies the rotation directly to queries and keys, making the relative offset appear cleanly in their dot product.
 
 ---
 
@@ -127,7 +184,38 @@ $$
 
 The figure shows one pair being rotated by successively larger angles as the position increases: at $m=0$ no rotation, at $m=1$ a rotation of $\theta$, at $m=2$ a rotation of $2\theta$, and so on. The *content* of the pair (its length) is untouched; only its *angle* encodes the position. This is the crucial difference from sinusoidal PE: sinusoidal PE **adds** a position vector to the token, whereas RoPE **rotates** the token's own query/key — it multiplies rather than adds.
 
-**Why rotation gives relative position.** Rotations have a beautiful algebraic property. If you rotate the query at position $m$ by $m\theta$ and the key at position $n$ by $n\theta$, then their dot product depends only on the *difference* of the angles, $(m - n)\theta$. Intuitively, the dot product of two vectors depends on the angle *between* them; rotating both by their respective positions leaves the in-between angle equal to $(m-n)\theta$. So the attention score $q_m \cdot k_n$ automatically becomes a function of the offset $m - n$ — pure relative position — even though each vector was rotated using only its own absolute position. That is the whole trick, and it is why RoPE is described as "absolute rotation, relative effect."
+**Why rotation gives relative position: the 2D calculation.** Focus on dimension pair $i$. Let $q_m^{(i)}$ be that pair from the query at position $m$, and let $k_n^{(i)}$ be the matching pair from the key at position $n$. RoPE uses the pair's frequency $\theta_i$ and the usual rotation matrix
+
+$$
+R(\alpha)=
+\begin{bmatrix}
+\cos\alpha & -\sin\alpha \\
+\sin\alpha & \cos\alpha
+\end{bmatrix}
+$$
+
+to produce $R(m\theta_i)q_m^{(i)}$ and $R(n\theta_i)k_n^{(i)}$. Each vector therefore receives an **absolute** rotation: the query uses its own position $m$, and the key uses its own position $n$.
+
+Now take their dot product, which is this pair's contribution to the attention score:
+
+$$
+\begin{aligned}
+\left\langle R(m\theta_i)q_m^{(i)},\,R(n\theta_i)k_n^{(i)}\right\rangle
+&= \left(q_m^{(i)}\right)^\top R(m\theta_i)^\top R(n\theta_i)k_n^{(i)} \\
+&= \left(q_m^{(i)}\right)^\top R(-m\theta_i)R(n\theta_i)k_n^{(i)} \\
+&= \left(q_m^{(i)}\right)^\top R((n-m)\theta_i)k_n^{(i)}.
+\end{aligned}
+$$
+
+The first line rewrites a dot product as matrix multiplication. The second uses $R(\alpha)^\top=R(-\alpha)$: transposing a rotation reverses it. The third uses $R(\alpha)R(\beta)=R(\alpha+\beta)$, so the query's rotation cancels the matching part of the key's rotation:
+
+$$
+R(-m\theta_i)R(n\theta_i)=R((n-m)\theta_i).
+$$
+
+The absolute positions $m$ and $n$ have disappeared separately. The score sees them only through the signed offset $n-m$. If we define relative position in the opposite direction, as query minus key, the same result is written using $m-n$; changing the convention only reverses the rotation direction.
+
+Geometrically, this says the dot product cares about the angle **between** the rotated query and key, not their two angles measured from the horizontal axis. Shift both tokens forward by the same amount $s$, and the offset remains $(n+s)-(m+s)=n-m$, so their pairwise score is unchanged. RoPE is therefore an **absolute rotation with a relative effect**. Applying this calculation independently to every dimension pair gives the full RoPE attention score.
 
 ### 7.2 Multi-frequency rotation
 
@@ -153,6 +241,47 @@ Concretely, for a sequence of length 512 with $d/2 = 64$ pairs, the angle applie
 ```
 
 Each *row* is one position; each *column* is one frequency. Row $m$ tells you exactly how much to rotate each of the 64 pairs for a token at position $m$. Fast columns (left) sweep through many full turns across the sequence; slow columns (right) barely budge. Together they give the model both fine and coarse positional resolution — the same Fourier-code intuition as sinusoidal PE, but delivered by rotating the query/key rather than adding a vector.
+
+**Putting all 64 rotations into one matrix.** For this example $d=128$, so the 64 pairwise rotations can be assembled into one $128\times128$ matrix. Define $c_i=\cos(m\omega_i)$ and $s_i=\sin(m\omega_i)$ for pair $i$ at position $m$. Then the full RoPE operator is
+
+$$
+R_m=
+\begin{bmatrix}
+c_0 & -s_0 & 0 & 0 & \cdots & 0 & 0 \\
+s_0 &  c_0 & 0 & 0 & \cdots & 0 & 0 \\
+0 & 0 & c_1 & -s_1 & \cdots & 0 & 0 \\
+0 & 0 & s_1 &  c_1 & \cdots & 0 & 0 \\
+\vdots & \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\
+0 & 0 & 0 & 0 & \cdots & c_{63} & -s_{63} \\
+0 & 0 & 0 & 0 & \cdots & s_{63} &  c_{63}
+\end{bmatrix}
+=
+\mathrm{diag}\!\left(
+R(m\omega_0),R(m\omega_1),\ldots,R(m\omega_{63})
+\right).
+$$
+
+The displayed zeros mean that different pairs never mix. The upper-left $2\times2$ block rotates coordinates $(d_0,d_1)$ by $m\omega_0$, the next block rotates $(d_2,d_3)$ by $m\omega_1$, and the lower-right block rotates $(d_{126},d_{127})$ by $m\omega_{63}$. Thus applying RoPE to an entire query vector is simply
+
+$$
+q_m' = R_m q_m,
+$$
+
+where $q_m'$ is the position-rotated query. The key at position $n$ similarly becomes $k_n'=R_nk_n$.
+
+The 2D cancellation from the previous section now happens in every diagonal block at once:
+
+$$
+\begin{aligned}
+(q_m')^\top k_n'
+&=q_m^\top R_m^\top R_n k_n \\
+&=q_m^\top\mathrm{diag}\!\left(
+R((n-m)\omega_0),\ldots,R((n-m)\omega_{63})
+\right)k_n.
+\end{aligned}
+$$
+
+This is the full picture of 1D RoPE for a 128-dimensional head: one absolute position $m$ creates 64 rotation angles, those rotations fill the diagonal of one large matrix, and the query-key dot product reduces all 64 blocks to the same relative offset $n-m$ at different frequencies.
 
 ### 7.3 Extending to multiple axes: multi-axis RoPE
 
