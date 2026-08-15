@@ -14,6 +14,10 @@ This note builds up the idea from scratch. We start with *why* attention is orde
 - [Learnable vs. fixed position embeddings](#learnable-vs-fixed-position-embeddings)
 - [Sinusoidal position encoding](#sinusoidal-position-encoding)
 - [Rotary Position Embeddings (RoPE)](#rotary-position-embeddings-rope)
+  - [7.1 RoPE in 1D: the core idea](#71-rope-in-1d-the-core-idea)
+  - [7.2 Multi-frequency rotation](#72-multi-frequency-rotation)
+  - [7.3 Extending to multiple axes: multi-axis RoPE](#73-extending-to-multiple-axes-multi-axis-rope)
+  - [7.4 Extending context: Position Interpolation and NTK-aware scaling](#74-extending-context-position-interpolation-and-ntk-aware-scaling)
 - [Takeaways](#takeaways)
 - [Sources](#sources)
 
@@ -313,33 +317,83 @@ Width and height get the most dimensions (96 each) because high-resolution frame
 
 **Why the scale factors?** This is the subtle part. The axes live on very different numeric ranges. Spatial indices might run 0–53, while time in seconds might run only 0–1.25 for a short clip. If you fed those raw into RoPE, a one-*frame* step (say 0.083 s) would produce a *tiny* rotation while a one-*pixel* step produced a large one. The model would then have excellent spatial resolution but almost no temporal resolution — consecutive frames would look positionally identical. The scale factors **stretch each axis so that a one-step move along *any* axis produces a comparable-magnitude rotation.** Multiplying time by 24 and space by 8 rebalances them so the model gets even positional resolution across width, height, and time.
 
-### 7.4 NTK scaling: extending to longer contexts
+### 7.4 Extending context: Position Interpolation and NTK-aware scaling
 
-A final practical problem. RoPE is trained with positions up to some maximum (say 2048, or a 32×32 latent grid). What happens at inference when we hand it position 4096, or a 64×64 grid? The rotation angles $m\theta$ grow into ranges the model **never saw during training**, the query/key rotations look unfamiliar, and quality drops. This is the length-extrapolation problem again, now for RoPE specifically.
-
-**NTK scaling** (from "NTK-aware" RoPE interpolation; NTK = Neural Tangent Kernel, the theory that motivated it) is a clean fix. Rather than extrapolating into unseen large angles, it **stretches the frequency ladder** so that larger positions map back into the familiar angle range the model was trained on. The adjustment is applied to the base frequency:
+RoPE can be evaluated at any position, but that does not mean a trained model understands every resulting angle. Suppose training used relative offsets up to $L$, but inference asks for offsets up to
 
 $$
-\theta_{\text{scaled}} = \theta \cdot (\text{scale})^{\,D/(D-2)}
+L' = sL,
 $$
 
-Here $\theta$ is the original base ($10000$), $D$ is the number of dimensions on that axis, and `scale` is how much larger the content is than at training time. Reading the formula: increasing the base $\theta$ makes *every* frequency slower (longer wavelengths), so a large position now produces a rotation that "feels like" a smaller, in-distribution position. In plain terms — **if we process content 2× larger than training, set `scale = 2`, which slows the rotations just enough that positions 0–4096 now occupy the angle range the model learned on 0–2048.** The exponent $D/(D-2)$ (close to 1 for large $D$) is the precise correction that keeps the *fast* frequencies mostly intact while stretching the slow ones — you interpolate long-range positions without blurring short-range detail.
+where $L'$ is the new context length and $s>1$ is the extension factor. For example, extending a 2048-token model to 4096 tokens gives $s=2$. At frequency $\omega_i$, the largest angle seen during training was $L\omega_i$, whereas inference now reaches $L'\omega_i=sL\omega_i$. Some dimension pairs are therefore pushed onto arcs of their circles that training never covered.
 
-For a spatial axis, `scale` is derived from how much bigger the current grid is than the training grid. A common rule is:
+The frequency ladder tells us which pairs are most vulnerable. Fast pairs at small $i$ complete many turns within the training window, so larger offsets mostly revisit familiar angles modulo $2\pi$. Slow pairs at large $i$ may have traversed only a small arc during training, so extending the context sends them directly into unseen angular territory. PI and NTK-aware scaling both try to keep those angles familiar, but they make different trade-offs.
+
+**Position Interpolation (PI): squeeze the entire new context into the old one.** The simplest solution is to divide every inference position by $s$:
 
 $$
-\text{scale} = \left(\frac{\max(h, w)}{32}\right)^{3}
+m \longmapsto \frac{m}{s}.
 $$
 
-read as: (1) look at the current latent size $h \times w$; (2) compare to the reference training size of 32; (3) if the content is larger, raise the ratio to the third power to get the scale.
+Since a RoPE angle is $m\omega_i$, scaling the position is equivalent to scaling every frequency:
 
-**Concrete example.** Training used 32×32 latent grids (512×512 pixel images). Now we generate a 64×64 latent grid (1024×1024 image):
+$$
+m\omega_i \longmapsto \frac{m}{s}\omega_i
+=m\frac{\omega_i}{s},
+\qquad
+\omega_i \longmapsto \omega_i^{\mathrm{PI}}=\frac{\omega_i}{s}.
+$$
 
-- ratio $= \max(h,w)/32 = 64/32 = 2$
-- $\text{scale} = 2^3 = 8$
-- $\theta_{\text{scaled}} = 10000 \cdot 8^{\,96/94} \approx 10000 \cdot 8.36 \approx 83{,}600$
+This guarantees that the new endpoint maps to the old one:
 
-The much larger base makes position 64 in the 1024px image rotate as if it were around position 8 in training — comfortably inside the learned range — so the model generalizes to the bigger canvas without ever having trained on it.
+$$
+L'\omega_i^{\mathrm{PI}}
+=sL\frac{\omega_i}{s}
+=L\omega_i.
+$$
+
+Thus no pair sees an angle beyond its training range. Imagine a map printed for a five-mile trail. To show a ten-mile trail on the same sheet, PI relabels the scale so that every physical mile occupies half as much paper. The whole route fits, but nearby landmarks become crowded together. RoPE has the same problem: dividing **all** frequencies by $s$ compresses even the fast pairs that already handled long offsets safely. Those pairs carry fine local distinctions, so uniform compression can blur the model's sense of nearby tokens or consecutive frames. PI is simple and often works well with a short fine-tune, but can lose local detail when applied training-free.
+
+**NTK-aware scaling: preserve fast pairs and compress slow pairs.** The natural improvement is to leave the high frequencies alone and progressively interpolate only toward the low-frequency end. NTK-aware scaling achieves this by changing the RoPE base rather than scaling every position. Let $B=10000$ be the original base, so
+
+$$
+\omega_i=B^{-2i/d}.
+$$
+
+For extension factor $s$, replace $B$ with
+
+$$
+B'=B\,s^{d/(d-2)}.
+$$
+
+The important part is what this base change does to each frequency. Substituting $B'$ into the frequency formula gives
+
+$$
+\begin{aligned}
+\omega_i^{\mathrm{NTK}}
+&=(B')^{-2i/d} \\
+&=\left(B\,s^{d/(d-2)}\right)^{-2i/d} \\
+&=B^{-2i/d}s^{-2i/(d-2)} \\
+&=\omega_i\,s^{-2i/(d-2)}.
+\end{aligned}
+$$
+
+Here $d$ is the number of dimensions participating in this 1D RoPE axis. The exponent explains the whole method:
+
+- At the fastest pair, $i=0$, the factor is $s^0=1$, so $\omega_0^{\mathrm{NTK}}=\omega_0$. **Local resolution is untouched.**
+- At the slowest pair, $i=d/2-1$, the exponent becomes $-1$, so $\omega_{d/2-1}^{\mathrm{NTK}}=\omega_{d/2-1}/s$. **The vulnerable slowest pair receives full PI-style interpolation.**
+- Between those endpoints, the scale changes smoothly and geometrically from $1$ to $1/s$.
+
+A ruler gives the right intuition. To measure a longer distance, we would like to preserve the millimeter ticks that resolve nearby points while stretching the coarse kilometer marks that determine the total range. PI shrinks every tick equally. NTK-aware scaling keeps the finest ticks fixed and increasingly stretches the coarser ones. That is why it usually preserves local detail better than PI in training-free context extension.
+
+For the earlier $d=128$, 64-pair example with $s=2$, pair 0 keeps its original frequency, pair 63 is divided by 2, and the pairs between them receive intermediate factors:
+
+$$
+\omega_i^{\mathrm{NTK}}=\omega_i\,2^{-2i/126},
+\qquad i=0,1,\ldots,63.
+$$
+
+The name “NTK-aware” comes from the neural-tangent-kernel argument that motivated the base rescaling. For understanding the mechanism, the practical takeaway is simpler: **PI compresses the whole frequency ladder uniformly; NTK-aware scaling bends the ladder, preserving fast local frequencies while compressing slow global frequencies.**
 
 ---
 
@@ -351,7 +405,7 @@ The much larger base makes position 64 in the 1024px image rotate as if it were 
 - **Sinusoidal PE** stacks $d/2$ (sin, cos) pairs on a **geometric ladder of frequencies** ($\omega_i = 10000^{-2i/d}$): fast pairs resolve nearby positions, slow pairs resolve far-apart ones. Because rotating an angle is linear, position $m+k$ is a fixed linear map of position $m$ — a hint of relative structure.
 - **RoPE** encodes position by **rotating** each query/key dimension-pair by angle $m\theta$. Since a dot product depends on the angle *between* vectors, $q_m \cdot k_n$ collapses to a function of the offset $m-n$ — **applied like absolute, relative in effect**, with no attention-kernel changes.
 - **Multi-axis RoPE** (images/video) runs an independent 1D RoPE per axis (width, height, time, global index) and concatenates; per-axis **scale factors** equalize the rotation magnitude of a one-step move across axes with different numeric ranges.
-- **NTK scaling** extends RoPE to longer contexts by increasing the base $\theta$ ($\theta_{\text{scaled}} = \theta\,(\text{scale})^{D/(D-2)}$), slowing the rotations so unseen large positions map back into the trained angle range.
+- **PI and NTK-aware scaling** extend RoPE beyond its training length. PI divides every frequency by $s$, fitting all angles into the trained range but compressing local detail. NTK-aware scaling changes the base so the fastest pair is untouched, the slowest pair is divided by $s$, and intermediate pairs are scaled smoothly between them.
 
 ---
 
@@ -361,4 +415,5 @@ The much larger base makes position 64 in the 1024px image rotate as if it were 
 - Shaw, Uszkoreit, Vaswani (2018), [*Self-Attention with Relative Position Representations*](https://arxiv.org/abs/1803.02155) (early learned relative position bias).
 - Raffel et al. (2020), [*Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer* (T5)](https://arxiv.org/abs/1910.10683) (relative position bias used in T5).
 - Su et al. (2021), [*RoFormer: Enhanced Transformer with Rotary Position Embedding*](https://arxiv.org/abs/2104.09864) (the RoPE paper).
+- Chen et al. (2023), [*Extending Context Window of Large Language Models via Positional Interpolation*](https://arxiv.org/abs/2306.15595) (Position Interpolation for extending RoPE context lengths).
 - bloc97 / kaiokendev (2023), NTK-aware scaled RoPE, and Peng et al. (2023), [*YaRN: Efficient Context Window Extension of Large Language Models*](https://arxiv.org/abs/2309.00071) (NTK / frequency-scaling for context extension; the $D/(D-2)$ scaling).
