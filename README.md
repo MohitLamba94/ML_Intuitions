@@ -531,4 +531,21 @@ This repository contains personal notes and learning material. The goal is to bu
   - [Practical guidance and takeaways](misc/tsne.md#practical-guidance-and-takeaways)
   - [Sources](misc/tsne.md#sources)
 
+- **[Wavelets for Image Processing](misc/wavelet_decomposition.md)**
+  - [Setup and Notation](misc/wavelet_decomposition.md#setup-and-notation)
+  - [Why Fourier is not enough](misc/wavelet_decomposition.md#why-fourier-is-not-enough)
+  - [The key idea: probe at many scales](misc/wavelet_decomposition.md#the-key-idea-probe-at-many-scales)
+  - [What exactly is a wavelet?](misc/wavelet_decomposition.md#what-exactly-is-a-wavelet)
+  - [Continuous vs discrete: which one you actually use](misc/wavelet_decomposition.md#continuous-vs-discrete-which-one-you-actually-use)
+  - [The Haar wavelet: a full worked example](misc/wavelet_decomposition.md#the-haar-wavelet-a-full-worked-example)
+  - [Multiresolution: the filter-bank / pyramid view](misc/wavelet_decomposition.md#multiresolution-the-filter-bank--pyramid-view)
+  - [From 1D to 2D images: the subbands](misc/wavelet_decomposition.md#from-1d-to-2d-images-the-subbands)
+  - [Wavelet families: Haar, Daubechies, and friends](misc/wavelet_decomposition.md#wavelet-families-haar-daubechies-and-friends)
+  - [Application 1: image compression (JPEG 2000)](misc/wavelet_decomposition.md#application-1-image-compression-jpeg-2000)
+  - [Application 2: denoising by thresholding](misc/wavelet_decomposition.md#application-2-denoising-by-thresholding)
+  - [Application 3: edges, fusion, and other uses](misc/wavelet_decomposition.md#application-3-edges-fusion-and-other-uses)
+  - [Where wavelets sit today (vs Fourier and CNNs)](misc/wavelet_decomposition.md#where-wavelets-sit-today-vs-fourier-and-cnns)
+  - [Practical guidance and takeaways](misc/wavelet_decomposition.md#practical-guidance-and-takeaways)
+  - [Sources](misc/wavelet_decomposition.md#sources)
+
 <!-- END AUTO-TOC -->
