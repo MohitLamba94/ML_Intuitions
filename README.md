@@ -383,6 +383,10 @@ This repository contains personal notes and learning material. The goal is to bu
   - [Learnable vs. fixed position embeddings](training_llms/002_PositionEmbeddings.md#learnable-vs-fixed-position-embeddings)
   - [Sinusoidal position encoding](training_llms/002_PositionEmbeddings.md#sinusoidal-position-encoding)
   - [Rotary Position Embeddings (RoPE)](training_llms/002_PositionEmbeddings.md#rotary-position-embeddings-rope)
+    - [7.1 RoPE in 1D: the core idea](training_llms/002_PositionEmbeddings.md#71-rope-in-1d-the-core-idea)
+    - [7.2 Multi-frequency rotation](training_llms/002_PositionEmbeddings.md#72-multi-frequency-rotation)
+    - [7.3 Extending to multiple axes: multi-axis RoPE](training_llms/002_PositionEmbeddings.md#73-extending-to-multiple-axes-multi-axis-rope)
+    - [7.4 Extending context: Position Interpolation and NTK-aware scaling](training_llms/002_PositionEmbeddings.md#74-extending-context-position-interpolation-and-ntk-aware-scaling)
   - [Takeaways](training_llms/002_PositionEmbeddings.md#takeaways)
   - [Sources](training_llms/002_PositionEmbeddings.md#sources)
 
@@ -509,5 +513,22 @@ This repository contains personal notes and learning material. The goal is to bu
   - [10. A note on speculative decoding (different axis)](training_llms/009_LLM_decoding.md#10-a-note-on-speculative-decoding-different-axis)
   - [Recap](training_llms/009_LLM_decoding.md#recap)
   - [Sources](training_llms/009_LLM_decoding.md#sources)
+
+### misc/
+
+- **[t-SNE: Visualising High-Dimensional Data in 2D](misc/tsne.md)**
+  - [Setup and Notation](misc/tsne.md#setup-and-notation)
+  - [Why not just use PCA?](misc/tsne.md#why-not-just-use-pca)
+  - [Step 1: turn distances into neighbour probabilities](misc/tsne.md#step-1-turn-distances-into-neighbour-probabilities)
+  - [Perplexity and the per-point bandwidth](misc/tsne.md#perplexity-and-the-per-point-bandwidth)
+  - [Step 2: the same idea in the 2D map, and the cost function](misc/tsne.md#step-2-the-same-idea-in-the-2d-map-and-the-cost-function)
+  - [The crowding problem and why Student-t](misc/tsne.md#the-crowding-problem-and-why-student-t)
+  - [The gradient as attraction and repulsion](misc/tsne.md#the-gradient-as-attraction-and-repulsion)
+  - [Optimisation tricks that actually matter](misc/tsne.md#optimisation-tricks-that-actually-matter)
+  - [Making it scale: Barnes-Hut](misc/tsne.md#making-it-scale-barnes-hut)
+  - [How to read a t-SNE plot (pitfalls)](misc/tsne.md#how-to-read-a-t-sne-plot-pitfalls)
+  - [t-SNE vs UMAP](misc/tsne.md#t-sne-vs-umap)
+  - [Practical guidance and takeaways](misc/tsne.md#practical-guidance-and-takeaways)
+  - [Sources](misc/tsne.md#sources)
 
 <!-- END AUTO-TOC -->
