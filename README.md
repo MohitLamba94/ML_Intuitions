@@ -364,6 +364,19 @@ This repository contains personal notes and learning material. The goal is to bu
   - [Takeaways](kimi_k3.md#takeaways)
   - [Sources](kimi_k3.md#sources)
 
+- **[JEPA: Predicting in Representation Space, Not Pixel Space](JEPA.md)**
+  - [Setup and Notation](JEPA.md#setup-and-notation)
+  - [The big idea: predict in latent space, not pixel space](JEPA.md#the-big-idea-predict-in-latent-space-not-pixel-space)
+  - [The energy-based framing](JEPA.md#the-energy-based-framing)
+  - [The collapse problem — and the two ways out](JEPA.md#the-collapse-problem--and-the-two-ways-out)
+  - [VICReg: preventing collapse with three regularizers](JEPA.md#vicreg-preventing-collapse-with-three-regularizers)
+  - [I-JEPA: the first concrete image architecture](JEPA.md#i-jepa-the-first-concrete-image-architecture)
+  - [V-JEPA and V-JEPA 2: video, and a world model you can plan with](JEPA.md#v-jepa-and-v-jepa-2-video-and-a-world-model-you-can-plan-with)
+  - [The founding vision: where JEPA sits in LeCun's stack](JEPA.md#the-founding-vision-where-jepa-sits-in-lecuns-stack)
+  - [Frontier work (brief)](JEPA.md#frontier-work-brief)
+  - [Takeaways](JEPA.md#takeaways)
+  - [Sources](JEPA.md#sources)
+
 ### training_llms/ — Training LLMs from Scratch
 
 - **[The Tokenizer: Turning Text into Integers an LLM Can Read](training_llms/001_tokeniser.md)**
