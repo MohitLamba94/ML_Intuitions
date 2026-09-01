@@ -377,6 +377,27 @@ This repository contains personal notes and learning material. The goal is to bu
   - [Takeaways](JEPA.md#takeaways)
   - [Sources](JEPA.md#sources)
 
+- **[Variational Autoencoders (VAE), the ELBO, and Discrete VAEs](vae.md)**
+  - [1. Setup and Notation](vae.md#1-setup-and-notation)
+  - [2. Why not a plain autoencoder?](vae.md#2-why-not-a-plain-autoencoder)
+  - [3. The VAE idea: encode to a distribution](vae.md#3-the-vae-idea-encode-to-a-distribution)
+  - [4. The ELBO, derived](vae.md#4-the-elbo-derived)
+    - [4.1 The problem: an intractable likelihood](vae.md#41-the-problem-an-intractable-likelihood)
+    - [4.2 Introduce the encoder and split the log-likelihood](vae.md#42-introduce-the-encoder-and-split-the-log-likelihood)
+    - [4.3 The two terms, unpacked](vae.md#43-the-two-terms-unpacked)
+  - [5. The reparameterization trick](vae.md#5-the-reparameterization-trick)
+  - [6. Putting it together: loss, training, generation](vae.md#6-putting-it-together-loss-training-generation)
+    - [6.1 Two failure modes: posterior collapse and the blur, and β-VAE](vae.md#61-two-failure-modes-posterior-collapse-and-the-blur-and-β-vae)
+  - [7. Discrete VAEs](vae.md#7-discrete-vaes)
+    - [7.1 VQ-VAE: snap the latent to a codebook](vae.md#71-vq-vae-snap-the-latent-to-a-codebook)
+    - [7.2 DALL-E's discrete VAE (Gumbel-softmax)](vae.md#72-dall-es-discrete-vae-gumbel-softmax)
+    - [7.3 VQ-VAE-2 and VQGAN, briefly](vae.md#73-vq-vae-2-and-vqgan-briefly)
+  - [8. Why diffusion uses a VAE, not a plain autoencoder](vae.md#8-why-diffusion-uses-a-vae-not-a-plain-autoencoder)
+    - [8.1 DDPM is a hierarchical VAE with a fixed encoder](vae.md#81-ddpm-is-a-hierarchical-vae-with-a-fixed-encoder)
+    - [8.2 Latent diffusion needs a well-behaved latent](vae.md#82-latent-diffusion-needs-a-well-behaved-latent)
+  - [9. Summary](vae.md#9-summary)
+  - [Sources](vae.md#sources)
+
 ### training_llms/ — Training LLMs from Scratch
 
 - **[The Tokenizer: Turning Text into Integers an LLM Can Read](training_llms/001_tokeniser.md)**
