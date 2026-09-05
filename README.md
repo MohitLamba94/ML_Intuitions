@@ -582,4 +582,8 @@ This repository contains personal notes and learning material. The goal is to bu
   - [Practical guidance and takeaways](misc/wavelet_decomposition.md#practical-guidance-and-takeaways)
   - [Sources](misc/wavelet_decomposition.md#sources)
 
+- **[ICP and Chamfer Distance for Point Clouds](misc/3D.md)**
+  - [Iterative Closest Point (ICP)](misc/3D.md#iterative-closest-point-icp)
+  - [Chamfer Distance](misc/3D.md#chamfer-distance)
+
 <!-- END AUTO-TOC -->
