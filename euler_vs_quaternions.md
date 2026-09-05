@@ -173,7 +173,7 @@ swing the third axis directly on top of the first. When that happens, two of you
 rotate about the *same* axis — you have lost a whole degree of freedom and can no longer tilt in one
 direction at all. That is **gimbal lock**.
 
-Concretely, in a ZYX (yaw–pitch–roll) scheme, pitch the middle axis to $\beta = 90°$. Now the yaw
+Concretely, in a ZYX (yaw–pitch–roll) scheme, pitch the middle axis to $\beta = 90^\circ$. Now the yaw
 axis and the roll axis point the same way, so turning the yaw knob and turning the roll knob do the
 *identical* thing. Three knobs, but only two distinct effects.
 
@@ -186,16 +186,67 @@ gives the same motion, and there is no ring left that tilts the object in the mi
 
 Two intuitions are worth nailing down, because they are widely garbled:
 
-1. **It is a coordinate singularity, not a numerical glitch.** Near $\beta = 90°$ the mapping from
-   angles to rotation becomes degenerate — many different $(\alpha,\gamma)$ pairs produce nearly the
-   same orientation, so small orientation changes demand wild, near-infinite angle changes. It is the
-   "crease" from the topology argument, landed at a specific pose.
+1. **It is a coordinate singularity, not a numerical glitch.** At $\beta = 90^\circ$, the mapping
+  from angles to rotation becomes degenerate: many different $(\alpha,\gamma)$ pairs produce exactly
+  the same orientation. Near that angle they produce nearly the same orientation, so recovering
+  Euler angles from a small orientation change can require very large changes in $\alpha$ and
+  $\gamma$. It is the "crease" from the topology argument, landed at a specific pose.
 2. **The lock belongs to the *three-sequential-angles scheme*, not to any one number format.** A
    common myth is that "quaternions have no gimbal lock" because quaternions are magic. The truer
    statement is that gimbal lock is what happens *when you insist on decomposing a rotation into
    three ordered turns*. If you convert a quaternion into Euler angles, the lock reappears in those
    angles. Quaternions dodge it only because they never decompose the rotation that way in the first
    place.
+
+Here is the degeneracy explicitly for the ZYX convention used above. When $\beta=90^\circ$, the
+rotation matrix simplifies to
+
+$$
+R_z(\gamma)R_y(90^\circ)R_x(\alpha)
+=
+\begin{bmatrix}
+0 & \sin(\alpha-\gamma) & \cos(\alpha-\gamma) \\
+0 & \cos(\alpha-\gamma) & -\sin(\alpha-\gamma) \\
+-1 & 0 & 0
+\end{bmatrix}.
+$$
+
+Before the lock, $\alpha$ controls roll and $\gamma$ controls yaw independently. In this matrix they
+appear only through the single difference $\alpha-\gamma$. The rotation therefore cannot tell them
+apart. For example, $(\alpha,\beta,\gamma)=(0^\circ,90^\circ,0^\circ)$ and
+$(30^\circ,90^\circ,30^\circ)$ produce exactly the same rotation because both have
+$\alpha-\gamma=0^\circ$. More generally, adding the same amount $\delta$ to both outer angles,
+$(\alpha+\delta,90^\circ,\gamma+\delta)$, leaves the orientation unchanged. One independent knob has
+disappeared.
+
+**Is $\beta=90^\circ$ the only dangerous condition?** Not quite. For this ZYX convention, gimbal
+lock occurs whenever
+
+$$
+\cos\beta=0,
+\qquad\text{equivalently}\qquad
+\beta=90^\circ+k\,180^\circ,
+$$
+
+where $k$ is any integer. If pitch is restricted to the usual range
+$-90^\circ\leq\beta\leq90^\circ$, the two singular endpoints are therefore
+$\beta=+90^\circ$ and $\beta=-90^\circ$. At the negative endpoint the matrix depends on
+$\alpha+\gamma$ rather than on the two angles separately. Values such as $270^\circ$ describe the
+same singular family after angle wraparound.
+
+The exact condition depends on the Euler convention:
+
+* For **Tait-Bryan sequences**, which use three different axes such as XYZ or ZYX, lock occurs when
+  the **middle angle** is $90^\circ+k\,180^\circ$.
+* For **proper Euler sequences**, which repeat the first axis such as ZXZ, lock occurs when the
+  **middle angle** is $k\,180^\circ$ (for example, $0^\circ$ or $180^\circ$).
+
+So there is no set of Euler-angle limits that removes gimbal lock globally. You can only keep a
+particular motion away from the singular pose. In practice: choose an axis order whose middle angle
+stays far from its lock condition for the motion you expect; treat a small $|\cos\beta|$ as a warning
+for a Tait-Bryan convention such as ZYX; and store, compose, and interpolate orientations as
+quaternions or matrices, converting to Euler angles only for display or editing. Switching Euler
+orders can move the singularity somewhere less troublesome, but every Euler order has one.
 
 ### Why Euler angles survive
 
