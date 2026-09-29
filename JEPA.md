@@ -1,6 +1,6 @@
 # JEPA: Predicting in Representation Space, Not Pixel Space
 
-Most self-supervised learning (SSL) tries to *reconstruct* — a masked-autoencoder paints back the hidden pixels, a language model predicts the next token. That works, but it forces the model to spend capacity modeling detail it can never actually predict: the exact texture of grass, the precise pixels of a shadow, the individual leaves on a tree. **JEPA — the Joint-Embedding Predictive Architecture** — is Yann LeCun's answer to this. Its one-sentence idea: *don't predict the input, predict an abstract representation of the input.* You run the missing part through an encoder to get a compact embedding, and you train a predictor to hit **that** embedding from the visible context. Everything unpredictable at the pixel level is quietly dropped, because a good encoder throws it away.
+Most self-supervised learning (SSL) tries to *reconstruct* — a masked-autoencoder paints back the hidden pixels, a language model predicts the next token. That works, but it forces the model to spend capacity modeling detail it can never actually predict: the exact texture of grass, the precise pixels of a shadow, the individual leaves on a tree. **JEPA — the Joint-Embedding Predictive Architecture** — is Yann LeCun's answer to this. Its one-sentence idea: *don't predict the input, predict an abstract representation of the input.* A target encoder sees the full input; we select its features for the hidden part and train a predictor to hit **those** features from the visible context. The hope is that useful representations set aside unpredictable pixel-level detail.
 
 This small change of target — from pixels to embeddings — is what LeCun bets on as a road toward machines that build **world models**: internal simulators that can predict "what happens next" well enough to *plan*, the way animals and humans do without being told the pixel-exact future. JEPA is the representation-learning core of that larger vision (laid out in his 2022 position paper), and the same predict-in-latent-space trick later powers **V-JEPA 2**, whose action-conditioned variant was dropped zero-shot onto a real robot arm for pick-and-place.
 
@@ -31,15 +31,16 @@ JEPA reuses a small, fixed cast of symbols across all its variants. Defining the
 | Symbol | Meaning |
 |---|---|
 | $x$ | the **context** — the visible part of the input (an image with blocks masked out, the first few video frames) |
-| $y$ | the **target** — the part we want to predict (the masked blocks, the future frames) |
+| $y$ | the **full input** used to compute target features (the whole image or video clip, including the parts hidden from the context encoder) |
+| $B$ | the positions of the target patches or frames whose features we want to predict |
 | $E_\theta$ | the **context encoder** with weights $\theta$; maps $x$ to its representation. Trained by gradient descent. |
-| $E_{\bar\theta}$ | the **target encoder** with weights $\bar\theta$; maps $y$ to its representation. Usually an **EMA** (exponential moving average) copy of $E_\theta$ — see below. |
+| $E_{\bar\theta}$ | the **target encoder** with weights $\bar\theta$; encodes the full input $y$. Usually an **EMA** (exponential moving average) copy of $E_\theta$ — see below. |
 | $s_x = E_\theta(x)$ | the representation (embedding) of the context |
-| $s_y = E_{\bar\theta}(y)$ | the representation of the target — **this is the prediction target**, computed in embedding space, not pixels |
+| $s_y = [E_{\bar\theta}(y)]_B$ | features selected at target positions $B$ from the full-input encoder output — **this is the prediction target**, not pixels |
 | $P_\phi$ | the **predictor** with weights $\phi$; takes $s_x$ (plus some hint of *where* $y$ is) and outputs a guess $\hat s_y$ |
 | $\hat s_y = P_\phi(s_x, \cdot)$ | the predicted target representation |
 | $z$ | a **latent variable** the predictor may use to absorb the genuinely unpredictable part of $y$ (energy-based framing) |
-| $F(x,y)$ | an **energy** — low when $x$ and $y$ are compatible, high when they are not |
+| $F(x,y;B)$ | an **energy** — low when context $x$ and the target features at positions $B$ in $y$ are compatible, high when they are not |
 
 Two terms worth pinning down now, because they carry the whole method:
 
@@ -48,9 +49,9 @@ Two terms worth pinning down now, because they carry the whole method:
 
 The core JEPA loss is then just a distance in representation space:
 
-$$\mathcal{L}(\theta,\phi) = \big\lVert\, \hat s_y - \mathrm{sg}(s_y) \,\big\rVert_2^2 = \big\lVert\, P_\phi\big(E_\theta(x),\cdot\big) - \mathrm{sg}\big(E_{\bar\theta}(y)\big) \,\big\rVert_2^2,$$
+$$\mathcal{L}(\theta,\phi) = \big\lVert\, \hat s_y - \mathrm{sg}(s_y) \,\big\rVert_2^2 = \big\lVert\, P_\phi\big(E_\theta(x),B\big) - \mathrm{sg}\big([E_{\bar\theta}(y)]_B\big) \,\big\rVert_2^2,$$
 
-where $\mathrm{sg}(\cdot)$ is the stop-gradient. In words: encode the context, predict the target's embedding, and compare it to the embedding the (slow) target encoder actually produces — measuring error **in the embedding space**, never in pixels. Every JEPA variant is a different choice of what $x$ and $y$ are (image blocks, video tubes, states-and-actions) plus a different trick for keeping $s_x, s_y$ from collapsing.
+where $\mathrm{sg}(\cdot)$ is the stop-gradient. In words: encode the visible context, predict features at positions $B$, and compare them to features selected from the (slow) target encoder's full-input output — measuring error **in embedding space**, never in pixels. Variants differ in what is visible, what is predicted (image patches, video regions, or future states), and how they avoid collapse.
 
 ---
 
@@ -60,7 +61,7 @@ Why is predicting embeddings so much better than predicting pixels? Because **mo
 
 Picture masking the right half of a photo of a street. A generative model (top-left below) must output *actual pixels* for that half: it has to commit to exact colors, the exact position of every parked car, the texture of the road. But from the left half you simply cannot know those details — so the pixel loss is dominated by noise you can never reduce, and the model burns capacity hedging over textures instead of learning that "this is a street with cars and buildings." That is the pixel-reconstruction tax.
 
-JEPA sidesteps it. Run the right half through an encoder first; the encoder's job is to keep semantic content ("cars here, sky there") and discard the un-guessable pixel noise. Now the predictor only has to match *that* — a much cleaner, lower-dimensional, genuinely predictable target. The model is rewarded for understanding the scene, not for hallucinating plausible textures.
+JEPA sidesteps it. Run the full photo through the target encoder, then select the features for the hidden right half; the encoder is encouraged to keep semantic content ("cars here, sky there") rather than un-guessable pixel noise. Now the predictor matches *those features* — a more abstract target than pixels. The model is rewarded for understanding the scene, not for hallucinating plausible textures.
 
 ![Three side-by-side schematics of self-supervised learning. Left, 'Generative': input x goes through an encoder to a latent z, then a decoder, producing reconstructed pixels x-hat, with the loss computed in pixel space, which wastes capacity on unpredictable detail. Middle, 'Joint-Embedding / Contrastive': two augmented views x and x-prime each pass through an encoder to embeddings s and s-prime; a double-headed arrow pulls positive pairs together while negatives are pushed apart, requiring many negative pairs. Right, 'JEPA': a context x passes through the trainable encoder E-theta to embedding s_x and then a predictor P-phi to a predicted embedding s-hat_y; separately a target y passes through an EMA target encoder E-bar-theta (marked stop-gradient) to a target embedding s_y; the predicted and target embeddings are matched in representation space.](assets/jepa_arch_comparison.jpg)
 
@@ -72,9 +73,9 @@ The figure makes the three-way contrast concrete. **Generative** predicts pixels
 
 LeCun likes to describe JEPA in the language of **energy-based models (EBMs)**, and it is worth a paragraph because it explains *why* the architecture looks the way it does.
 
-Think of a scalar **energy** $F(x,y)$ that measures compatibility: it should be **low** when $y$ is a plausible continuation/completion of $x$, and **high** otherwise. Training carves a landscape with valleys at the correct $(x,y)$ pairs. In JEPA the energy is exactly the prediction error in latent space,
+Think of a scalar **energy** $F(x,y;B)$ that measures compatibility: it should be **low** when the target features at positions $B$ in $y$ are a plausible continuation/completion of $x$, and **high** otherwise. Training carves a landscape with valleys at compatible context-target pairs. One possible latent-variable energy is the prediction error in representation space,
 
-$$F(x,y) = \min_{z}\ \big\lVert\, P_\phi\big(E_\theta(x), z\big) - E_{\bar\theta}(y) \,\big\rVert_2^2 .$$
+$$F(x,y;B) = \min_{z}\ \big\lVert\, P_\phi\big(E_\theta(x), B, z\big) - [E_{\bar\theta}(y)]_B \,\big\rVert_2^2 .$$
 
 Two things earn their place here. First, the **latent variable $z$**: some parts of $y$ are genuinely undetermined by $x$ (which way the pedestrian turns), and $z$ is a knob the predictor can set to account for that residual ambiguity — the $\min_z$ says "give the model the benefit of the doubt over things it could not have known." When $y$ is fully determined by $x$, $z$ does nothing and we recover the plain squared error from the Setup section. Second, this framing reframes collapse as a **failure of the energy landscape**: if $F$ is low *everywhere* (because the encoder outputs a constant, so every prediction is trivially perfect), the model is useless. Good SSL must push energy **down** on real pairs while keeping it **high** elsewhere — and the whole trick of non-contrastive methods like JEPA is to raise energy off the data *without* explicit negative samples. (For a gentle tutorial, see Dawid & LeCun's "Introduction to Latent Variable Energy-Based Models.")
 
@@ -88,11 +89,11 @@ Two things earn their place here. First, the **latent variable $z$**: some parts
 
 Every JEPA-style method is, at heart, a way to make the collapsed solution unreachable. There are **two families of fixes**, and JEPA's lineage uses them in different mixes:
 
-1. **Architectural / implicit (the I-JEPA & V-JEPA route).** Break the symmetry so the trivial solution isn't a stable fixed point. Concretely: (a) a **stop-gradient** on the target side, so the model can't lower the loss by degrading the target; (b) an **EMA target encoder**, a slowly-moving teacher the fast student chases — a moving target is much harder to collapse onto; and (c) an **asymmetric predictor** sitting only on the context side. This is the same recipe that keeps BYOL and DINO from collapsing, and it works *empirically* without an explicit anti-collapse loss term. The cost is that it's a bit mysterious — you're relying on training dynamics rather than a term you can point to.
+1. **Architectural / implicit (the I-JEPA & V-JEPA route).** Break the symmetry so collapse is avoided in practice. Concretely: (a) a **stop-gradient** on the target side, so the model can't lower the loss by directly degrading the target; (b) an **EMA target encoder**, a slowly-moving teacher the fast student chases; and (c) an **asymmetric predictor** sitting only on the context side. Related non-contrastive methods such as BYOL and DINO use similar ingredients, and this route works *empirically* without an explicit anti-collapse loss term. The cost is that you're relying on training dynamics rather than a term that directly enforces spread.
 
 2. **Regularization / explicit (the VICReg route).** Add a loss term that *directly* rewards spread-out, informative embeddings — penalize low per-dimension variance and penalize correlations between dimensions. Collapse becomes expensive because a constant embedding has zero variance, which the term punishes hard. This is transparent and easy to reason about, at the price of extra hyperparameters. It's worth understanding on its own because it makes JEPA's whole objective click — so it gets its own section next.
 
-In practice I-JEPA and V-JEPA lean on route 1, but the *reason* route 1 works is best understood through the lens of route 2: both are ensuring the embeddings keep **variance** (don't collapse to a point) and stay **decorrelated** (don't collapse to a line/subspace).
+In practice I-JEPA and V-JEPA lean on route 1. VICReg offers a useful contrast: it explicitly penalizes low variance and correlated dimensions, while EMA and stop-gradient do not directly enforce either property.
 
 ---
 
@@ -116,7 +117,7 @@ where $Z_{:,j}$ is coordinate $j$ across the batch, $\mathrm{std}$ is its standa
 $$c(Z) = \frac{1}{d}\sum_{i \neq j} \big[\mathrm{Cov}(Z)\big]_{ij}^2 .$$
 Driving off-diagonals to zero decorrelates the coordinates, so different dimensions are pushed to carry different information — spreading the reps out to *fill* the space rather than clumping onto a subspace.
 
-The full objective is a weighted sum $\lambda\, s + \mu\, [v(Z)+v(Z')] + \nu\, [c(Z)+c(Z')]$. The mental model: **invariance** teaches (match the views), while **variance + covariance together** are exactly "keep the cloud spread out and non-degenerate" — the two failure modes in the collapse figure. This is why VICReg needs no negative pairs and no EMA teacher: the anti-collapse pressure is written explicitly into the loss. And it's why the architectural tricks in I-JEPA/V-JEPA are doing morally the same job, just implicitly through training dynamics.
+The full objective is a weighted sum $\lambda\, s + \mu\, [v(Z)+v(Z')] + \nu\, [c(Z)+c(Z')]$. The mental model: **invariance** teaches (match the views), while **variance + covariance together** say "keep the cloud spread out and non-degenerate" — the two failure modes in the collapse figure. This is why VICReg needs no negative pairs and no EMA teacher: the anti-collapse pressure is written explicitly into the loss. I-JEPA/V-JEPA avoid collapse empirically through their training setup, without explicitly imposing these same statistical constraints.
 
 ---
 
@@ -128,12 +129,12 @@ The full objective is a weighted sum $\lambda\, s + \mu\, [v(Z)+v(Z')] + \nu\, [
 
 Walking the pipeline (right side of the figure):
 
-1. **Patchify and encode the context.** The image is split into patches (it's a Vision Transformer backbone). A single large **context block** is kept; the rest is dropped. Those context patches go through the trainable encoder $E_\theta$ to give context representations $s_x$.
-2. **Encode the targets separately, with the EMA encoder.** Independently, the *full* image is run through the **target encoder** $E_{\bar\theta}$ (the EMA copy), and from its patch-level output we read off the representations of **several target blocks** — these are the $s_y$ we want to hit. Computing targets from the full image, at the representation level, is what makes them semantically rich rather than pixel-exact.
-3. **Predict, block by block, using positional mask tokens.** For each target block, the predictor $P_\phi$ takes the context representations plus **mask tokens carrying the target's position** (this is the "$\cdot$" hint in $P_\phi(s_x,\cdot)$ — the predictor must be told *where* it's predicting, otherwise "predict some block" is ill-posed). It outputs $\hat s_y$ for that block.
+1. **Patchify and encode the context.** The image is split into patches (it's a Vision Transformer backbone). A large **context block** is sampled; any patches overlapping target blocks are removed before the rest goes through the trainable encoder $E_\theta$ to give context representations $s_x$.
+2. **Encode the targets separately, with the EMA encoder.** Independently, the *full* image $y$ is run through the **target encoder** $E_{\bar\theta}$ (the EMA copy), and from its patch-level output we read off the representations at the target positions $B$ — these are the $s_y$ we want to hit. Computing targets from the full image, at the representation level, is what makes them semantically rich rather than pixel-exact.
+3. **Predict, block by block, using positional mask tokens.** For each target block, the predictor $P_\phi$ takes the context representations plus **mask tokens carrying the target's position** (the $B$ in $P_\phi(s_x,B)$ — the predictor must be told *where* it's predicting, otherwise "predict some block" is ill-posed). It outputs $\hat s_y$ for that block.
 4. **Loss in representation space, stop-grad on targets.** Minimize $\lVert \hat s_y - \mathrm{sg}(s_y)\rVert_2^2$, backprop through $E_\theta$ and $P_\phi$ only; update $\bar\theta$ by EMA. No VICReg term is needed — the stop-grad + EMA + asymmetric predictor combination (route 1 above) is what holds off collapse.
 
-Two design choices carry the results. **Multi-block masking**: the targets are a *few, reasonably large* blocks and the context is one *large* block, deliberately non-overlapping. If the targets were tiny or adjacent to the context, the model could solve them by low-level interpolation (copy nearby texture) instead of semantic reasoning; large, distant blocks force it to predict *content*. **Predicting representations, not pixels**: this is what separates I-JEPA from a masked autoencoder (MAE). Empirically I-JEPA learns strong **semantic** features — competitive linear-probe and low-shot accuracy — and it trains **faster** than pixel-reconstruction MAE, because it never wastes gradient steps on un-guessable pixel detail. That efficiency-plus-semantics combination is the headline evidence for the whole "predict in latent space" thesis.
+Two design choices carry the results. **Multi-block masking**: the targets are a *few, reasonably large* blocks and the context is sampled as one *large* block, with overlaps removed. If the targets were tiny or directly visible in the context, the model could solve them by low-level copying instead of semantic reasoning; large hidden blocks encourage it to predict *content*. **Predicting representations, not pixels**: this is what separates I-JEPA from a masked autoencoder (MAE). Empirically I-JEPA learns strong **semantic** features — competitive linear-probe and low-shot accuracy — and it trains **faster** than pixel-reconstruction MAE, because it never wastes gradient steps on un-guessable pixel detail. That efficiency-plus-semantics combination is the headline evidence for the whole "predict in latent space" thesis.
 
 ---
 
@@ -141,18 +142,18 @@ Two design choices carry the results. **Multi-block masking**: the targets are a
 
 Images are static; the real prize is **time**. **V-JEPA** (Bardes et al., 2024) applies the exact same recipe to **video**: mask out spatio-temporal regions ("tubes" spanning several frames), encode the visible part, and predict the masked regions' representations. Video is the ideal testbed for the thesis, because the future is *even more* unpredictable at the pixel level (motion blur, lighting, exact positions) yet highly predictable at the *representation* level ("the ball keeps moving right"). V-JEPA learns motion-aware features from raw unlabeled video that transfer well to action-recognition tasks — without ever reconstructing a frame.
 
-**V-JEPA 2** (Assran et al., 2025) scales this up and, more importantly, turns the learned predictor into a **world model you can plan with**. The key extension is **V-JEPA 2-AC** ("action-conditioned"): the predictor is trained to answer "if the current latent state is $s_t$ and I take action $a$, what's the next latent state $\hat s_{t+1}$?" Trained on unlabeled robot video, this gives a latent-space simulator — and that is exactly the ingredient needed for planning.
+**V-JEPA 2** (Assran et al., 2025) scales this up and, more importantly, turns the learned predictor into a **world model you can plan with**. The key extension is **V-JEPA 2-AC** ("action-conditioned"): after video pretraining, it freezes the encoder and trains a new predictor to answer "if the current latent state is $s_t$ and I take action $a$, what's the next latent state $\hat s_{t+1}$?" Robot videos supply end-effector states, whose changes provide the actions. They are "unlabeled" in the sense that no task, reward, or success labels are needed. This gives a latent-space simulator — and that is exactly the ingredient needed for planning.
 
 ![A schematic of the V-JEPA 2-AC planning loop, titled 'plan by rolling the predictor forward in latent space'. Left to right: an 'observation (video frame)' box feeds the encoder E-theta, which produces a 'state rep s_t'; this feeds a 'predictor P-phi(s_t, a)' which outputs a 'predicted s-hat_{t+1}' box below it. A separate 'goal rep s_goal' box sits above the predictor, and a red double-headed arrow between the goal and the prediction is labelled 'cost = norm of (s-hat_{t+1} minus s_goal)'. A curved feedback arrow loops from the predicted next state back to the observation, captioned 'search over actions a (MPC), execute best, re-plan'.](assets/jepa_worldmodel_loop.jpg)
 
-The planning loop (a **model-predictive control / MPC** scheme, entirely in latent space):
+The figure shows a one-step prediction; in practice the **model-predictive control / MPC** loop rolls forward over a horizon:
 
-1. **Encode** the current observation to a state representation $s_t$, and encode a goal image to a **goal representation** $s_{\text{goal}}$.
-2. **Roll the predictor forward** over candidate action sequences: for each candidate $a$, predict $\hat s_{t+1}(a)$ — and chain it several steps ahead to imagine the trajectory, all without touching pixels or a physics simulator.
-3. **Score by a cost** = distance in representation space between the imagined outcome and the goal, $\lVert \hat s_{t+1} - s_{\text{goal}}\rVert$. Search (e.g. sampling / optimization) for the action sequence that minimizes it.
+1. **Encode** the current observation to a state representation $s_t$, and encode a goal image to a **goal representation** $s_{\text{goal}}$. The robot's current end-effector state is also available to the predictor.
+2. **Roll the predictor forward** over candidate action sequences of $T$ steps, where $T$ is the planning horizon. For each sequence, predict the future representations through step $t+T$, all without generating pixels or using a physics simulator.
+3. **Score by a cost** = $\lVert \hat s_{t+T} - s_{\text{goal}}\rVert_1$, the $L_1$ distance between the *final* imagined representation and the goal. Search over action sequences (using the cross-entropy method in V-JEPA 2-AC) for the one that minimizes it.
 4. **Execute** the first action, observe the real result, and **re-plan** — the standard MPC receding-horizon loop.
 
-The striking result: a V-JEPA 2-AC model trained purely on **unlabeled** robot video was deployed **zero-shot** for pick-and-place on a real arm — no task-specific reward, no demonstrations of the target task. That is the concrete payoff of the whole program: self-supervised representation learning yielding a predictor good enough to *plan* against, which is precisely LeCun's argument for why predicting representations (not pixels) is the road to agents that understand and act.
+The striking result: trained on robot video **and end-effector states**, without task or reward labels, V-JEPA 2-AC was deployed **zero-shot in new environments** for pick-and-place on real arms. It did not need task-specific fine-tuning for those deployments. That is the concrete payoff of the whole program: self-supervised representation learning yielding a predictor good enough to *plan* against, which is precisely LeCun's argument for why predicting representations (not pixels) is the road to agents that understand and act.
 
 ---
 
@@ -181,7 +182,7 @@ These are newer or more specialized; each is a tight sketch here and can be expa
 
 - **The one idea:** predict an *abstract representation* of the missing input, not the input itself. A good encoder discards un-guessable pixel detail, so the predictor learns semantics instead of hallucinating textures.
 - **JEPA vs the alternatives:** it keeps the masking/prediction setup of **generative** SSL but skips the pixel-reconstruction tax, and keeps the embedding comparison of **contrastive** SSL but needs **no negative pairs**.
-- **The whole difficulty is collapse.** Without pixels or negatives, a constant encoder trivially wins. Two fixes: implicit (stop-grad + EMA teacher + asymmetric predictor, used by I-JEPA/V-JEPA) and explicit (**VICReg**'s variance + invariance + covariance terms). Both amount to "keep the embedding cloud spread out and decorrelated."
+- **The whole difficulty is collapse.** Without pixels or negatives, a constant encoder trivially wins. Two approaches: implicit (stop-grad + EMA teacher + asymmetric predictor, used by I-JEPA/V-JEPA) and explicit (**VICReg**'s variance + invariance + covariance terms). Only VICReg directly penalizes low variance and correlated dimensions.
 - **It scales into a world model.** V-JEPA 2-AC turns the predictor into a latent-space simulator you can plan against with MPC — demonstrated zero-shot on a real robot — which is the concrete evidence for LeCun's larger bet.
 - **Mental model to carry:** JEPA is the world-model module of LeCun's autonomous-intelligence stack; H-JEPA (hierarchical, multi-scale) is the proposed route to long-horizon planning.
 
