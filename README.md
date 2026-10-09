@@ -398,6 +398,48 @@ This repository contains personal notes and learning material. The goal is to bu
   - [9. Summary](vae.md#9-summary)
   - [Sources](vae.md#sources)
 
+- **[FlashAttention-4: When Matmul Gets Faster Than the Rest of Attention](FlashAttention4.md)**
+  - [The problem: asymmetric hardware scaling](FlashAttention4.md#the-problem-asymmetric-hardware-scaling)
+  - [The B200 architecture that matters here](FlashAttention4.md#the-b200-architecture-that-matters-here)
+  - [Forward pass: keep matmul and softmax busy together](FlashAttention4.md#forward-pass-keep-matmul-and-softmax-busy-together)
+    - [Tile-level bottleneck](FlashAttention4.md#tile-level-bottleneck)
+    - [Ping-pong pipeline](FlashAttention4.md#ping-pong-pipeline)
+    - [Using another unit for some exponentials](FlashAttention4.md#using-another-unit-for-some-exponentials)
+    - [Rescale only when necessary](FlashAttention4.md#rescale-only-when-necessary)
+  - [Backward pass: shared-memory traffic takes over](FlashAttention4.md#backward-pass-shared-memory-traffic-takes-over)
+  - [Scheduling and reproducibility](FlashAttention4.md#scheduling-and-reproducibility)
+  - [Results, scope, and takeaways](FlashAttention4.md#results-scope-and-takeaways)
+  - [Source](FlashAttention4.md#source)
+
+- **[VideoJAM: Joint Appearance-Motion Representations for Enhanced Motion Generation in Video Models](VideoJAM.md)**
+  - [1. Why good-looking frames can still make a bad video](VideoJAM.md#1-why-good-looking-frames-can-still-make-a-bad-video)
+    - [1.1 The frame-shuffling experiment](VideoJAM.md#11-the-frame-shuffling-experiment)
+  - [2. The central idea: appearance and motion share a representation](VideoJAM.md#2-the-central-idea-appearance-and-motion-share-a-representation)
+  - [3. How motion becomes a learnable video](VideoJAM.md#3-how-motion-becomes-a-learnable-video)
+    - [3.1 Optical flow: where each visible point moves](VideoJAM.md#31-optical-flow-where-each-visible-point-moves)
+    - [3.2 Why encode flow as RGB](VideoJAM.md#32-why-encode-flow-as-rgb)
+  - [4. Setup and flow-matching basics](VideoJAM.md#4-setup-and-flow-matching-basics)
+  - [5. Joint training: one backbone, two targets](VideoJAM.md#5-joint-training-one-backbone-two-targets)
+    - [5.1 The architectural change](VideoJAM.md#51-the-architectural-change)
+    - [5.2 The joint objective](VideoJAM.md#52-the-joint-objective)
+    - [5.3 Training for missing conditions](VideoJAM.md#53-training-for-missing-conditions)
+  - [6. Inner-Guidance: use the evolving motion prediction](VideoJAM.md#6-inner-guidance-use-the-evolving-motion-prediction)
+    - [6.1 Three predictions from the same model](VideoJAM.md#61-three-predictions-from-the-same-model)
+    - [6.2 The sampling loop and guidance schedule](VideoJAM.md#62-the-sampling-loop-and-guidance-schedule)
+    - [6.3 Why not just reuse ordinary compositional guidance](VideoJAM.md#63-why-not-just-reuse-ordinary-compositional-guidance)
+  - [7. What the experiments actually establish](VideoJAM.md#7-what-the-experiments-actually-establish)
+    - [7.1 The strongest comparison: the same base model](VideoJAM.md#71-the-strongest-comparison-the-same-base-model)
+    - [7.2 More motion is not the same as better motion](VideoJAM.md#72-more-motion-is-not-the-same-as-better-motion)
+    - [7.3 What the ablations tell us](VideoJAM.md#73-what-the-ablations-tell-us)
+  - [8. Implementation costs and limitations](VideoJAM.md#8-implementation-costs-and-limitations)
+  - [9. Takeaways and connections](VideoJAM.md#9-takeaways-and-connections)
+  - [10. Related papers: motion, geometry, and correspondence](VideoJAM.md#10-related-papers-motion-geometry-and-correspondence)
+    - [10.1 MoAlign: teach motion through feature relationships](VideoJAM.md#101-moalign-teach-motion-through-feature-relationships)
+    - [10.2 GeoVideo: make generated depth agree across views](VideoJAM.md#102-geovideo-make-generated-depth-agree-across-views)
+    - [10.3 Track4Gen: preserve identity by learning to track](VideoJAM.md#103-track4gen-preserve-identity-by-learning-to-track)
+    - [10.4 Comparing the four approaches](VideoJAM.md#104-comparing-the-four-approaches)
+  - [11. Sources and figure reproduction](VideoJAM.md#11-sources-and-figure-reproduction)
+
 ### training_llms/ — Training LLMs from Scratch
 
 - **[The Tokenizer: Turning Text into Integers an LLM Can Read](training_llms/001_tokeniser.md)**
